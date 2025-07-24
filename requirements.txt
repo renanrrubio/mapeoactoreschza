@@ -1,5 +1,11 @@
-streamlit
-pandas
-plotly
-openpyxl
-xlrd
+streamlit>=1.29.0
+pandas>=1.3.0
+plotly>=5.0.0
+openpyxl>=3.0.0
+xlrd>=2.0.0 # Requerido para leer archivos .xls antiguos
+fpdf>=1.7.2
+networkx>=3.0
+numpy>=1.21.0
+# kaleido y psutil son necesarios para `fig.write_image` en Plotly
+kaleido>=0.2.1
+psutil>=5.0.0
