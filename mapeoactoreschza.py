@@ -11,15 +11,26 @@ from datetime import datetime
 import plotly.io as pio
 import networkx as nx
 import numpy as np
+import colorsys
+
 # Configuración de Plotly
 pio.kaleido.scope.mathjax = None
+
 # Configuración de la página
 st.set_page_config(
-    page_title="Excel Analytics Pro+",
+    page_title="MAPEO DE ACTORES DE LOS VALLE CHANCAY - ZAÑA",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Función para resetear el estado del reporte
+def reset_report_state():
+    """Reinicia el estado del reporte en session_state."""
+    if 'report_plots' in st.session_state:
+        del st.session_state['report_plots']
+    if 'report_stats' in st.session_state:
+        del st.session_state['report_stats']
 
 # Clase para generar PDF (con fuente Arial)
 class PDFReport(FPDF):
@@ -29,29 +40,29 @@ class PDFReport(FPDF):
         self.HEIGHT = 297
         self.set_auto_page_break(auto=True, margin=15)
         self.set_font('Arial', '', 10)
-        
+
     def header(self):
         self.set_font('Arial', 'B', 12)
         self.cell(0, 10, 'Reporte Analítico - Excel Analytics Pro+', 0, 1, 'C')
         self.ln(5)
-        
+
     def footer(self):
         self.set_y(-15)
         self.set_font('Arial', 'I', 8)
         self.cell(0, 10, f'Página {self.page_no()}', 0, 0, 'C')
-        
+
     def add_section_title(self, title):
         self.set_font('Arial', 'B', 11)
         self.cell(0, 10, title, 0, 1)
         self.ln(2)
-        
+
     def add_plot(self, plot_path, caption="", width=180):
         if os.path.exists(plot_path):
             self.image(plot_path, x=(self.WIDTH - width)/2, w=width)
             self.set_font('Arial', 'I', 8)
             self.cell(0, 5, caption, 0, 1, 'C')
             self.ln(5)
-            
+
     def add_table(self, df, title=""):
         if title:
             self.add_section_title(title)
@@ -72,7 +83,7 @@ class PDFReport(FPDF):
         self.ln(5)
 
 # Cache de datos
-@st.cache_data(show_spinner="Cargando y procesando datos...")
+@st.cache_data(show_spinner="Cargando y procesando datos...", hash_funcs={BytesIO: lambda _: None})
 def load_and_process(file, sheet_name=None):
     """Carga y valida el archivo Excel"""
     try:
@@ -80,9 +91,14 @@ def load_and_process(file, sheet_name=None):
             return None, "No se cargó ningún archivo"
         if file.size > 200 * 1024 * 1024:  # 200MB límite
             return None, "Archivo demasiado grande (límite: 200MB)"
+        # Resetear estado del reporte al cargar nuevo archivo
+        reset_report_state()
+        
         engines = ['openpyxl', 'xlrd']
         for engine in engines:
             try:
+                # Reiniciar el puntero del archivo
+                file.seek(0)
                 excel_data = pd.ExcelFile(BytesIO(file.read()), engine=engine)
                 df = pd.read_excel(excel_data, sheet_name=sheet_name) if sheet_name else pd.read_excel(excel_data)
                 return df, "Datos cargados exitosamente"
@@ -341,7 +357,6 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
 def create_sociogram(data, source_col, target_col, weight_col=None, node_size_col=None, layout='circular'):
     """
     Crea un sociograma (diagrama de red) a partir de datos de relaciones.
-    
     Parámetros:
     - data: DataFrame con los datos
     - source_col: Columna que contiene los nodos de origen
@@ -349,7 +364,6 @@ def create_sociogram(data, source_col, target_col, weight_col=None, node_size_co
     - weight_col: Columna opcional para el peso de las conexiones
     - node_size_col: Columna opcional para el tamaño de los nodos
     - layout: Tipo de disposición ('circular', 'spring', 'random')
-    
     Retorna:
     - fig: Objeto Plotly Figure
     - error: Mensaje de error si ocurre
@@ -358,36 +372,28 @@ def create_sociogram(data, source_col, target_col, weight_col=None, node_size_co
         # Validaciones iniciales
         if not isinstance(data, pd.DataFrame):
             return None, "Los datos deben ser un DataFrame de pandas"
-            
         if data.empty:
             return None, "El conjunto de datos está vacío"
-            
         required_cols = [source_col, target_col]
         missing_cols = [col for col in required_cols if col not in data.columns]
         if missing_cols:
             return None, f"Faltan columnas requeridas: {', '.join(missing_cols)}"
-            
         # Eliminar filas con valores nulos en las columnas de interés
         clean_data = data.dropna(subset=[source_col, target_col])
         if clean_data.empty:
             return None, "No hay datos válidos después de eliminar filas con valores nulos"
-            
         # Crear grafo dirigido
         G = nx.DiGraph()
-        
         # Agregar nodos y aristas
         for _, row in clean_data.iterrows():
             source = str(row[source_col])
             target = str(row[target_col])
-            
             # Omitir auto-bucles
             if source == target:
                 continue
-                
             # Agregar nodos
             G.add_node(source)
             G.add_node(target)
-            
             # Agregar o actualizar arista
             if weight_col and weight_col in data.columns:
                 try:
@@ -396,37 +402,55 @@ def create_sociogram(data, source_col, target_col, weight_col=None, node_size_co
                     weight = 1.0
             else:
                 weight = 1.0
-                
             if G.has_edge(source, target):
                 G[source][target]['weight'] += weight
             else:
                 G.add_edge(source, target, weight=weight)
-        
         if G.number_of_nodes() == 0:
             return None, "No se pudieron crear nodos a partir de los datos"
-            
-        # Calcular posiciones de los nodos
-        if layout == 'circular':
+        
+        # --- Mejora en el layout para reducir cruces ---
+        # Ajustar parámetros para mejor distribución en spring layout
+        if layout == 'spring':
+             # Aumentar iteraciones y ajustar k para separar más los nodos
+            pos = nx.spring_layout(G, k=5/np.sqrt(G.number_of_nodes()), iterations=100, seed=42) 
+        elif layout == 'circular':
             pos = nx.circular_layout(G)
-        elif layout == 'spring':
-            pos = nx.spring_layout(G, k=1/np.sqrt(G.number_of_nodes()), iterations=50)
         elif layout == 'random':
             pos = nx.random_layout(G)
         else:
             pos = nx.circular_layout(G)  # Por defecto
-            
+        
+        # --- Generar colores únicos para nodos ---
+        nodes = list(G.nodes())
+        num_nodes = len(nodes)
+        # Generar colores HSV distribuidos uniformemente
+        hues = np.linspace(0, 1, num_nodes, endpoint=False)
+        # Convertir HSV a RGB
+        node_colors = {}
+        for i, node in enumerate(nodes):
+            rgb = colorsys.hsv_to_rgb(hues[i], 0.8, 0.8) # Saturación y valor ajustables
+            # Convertir a valores de 0-255 para Plotly
+            node_colors[node] = tuple(int(c * 255) for c in rgb)
+
         # Extraer coordenadas
         node_x = []
         node_y = []
         node_text = []
         node_sizes = []
+        node_labels_x = []
+        node_labels_y = []
+        node_colors_plotly = [] # Para los colores de los nodos
         
         for node in G.nodes():
             x, y = pos[node]
             node_x.append(x)
             node_y.append(y)
             node_text.append(node)
-            
+            node_colors_plotly.append(f'rgb{node_colors[node]}') # Color del nodo
+            # Posición ligeramente desplazada para la etiqueta
+            node_labels_x.append(x)
+            node_labels_y.append(y - 0.04) # Desplazar hacia abajo
             # Tamaño de nodo basado en grado o columna proporcionada
             if node_size_col and node_size_col in data.columns:
                 # Usar valor promedio de la columna para este nodo
@@ -434,8 +458,8 @@ def create_sociogram(data, source_col, target_col, weight_col=None, node_size_co
                 if not node_data.empty and pd.api.types.is_numeric_dtype(data[node_size_col]):
                     size_val = node_data[node_size_col].mean()
                     if pd.notna(size_val):
-                        # Normalizar tamaño (ej. entre 10 y 50)
-                        min_size, max_size = 10, 50
+                        # Normalizar tamaño (ej. entre 20 y 60)
+                        min_size, max_size = 20, 60
                         min_val = data[node_size_col].min()
                         max_val = data[node_size_col].max()
                         if max_val != min_val:
@@ -444,14 +468,14 @@ def create_sociogram(data, source_col, target_col, weight_col=None, node_size_co
                             normalized_size = (min_size + max_size) / 2
                         node_sizes.append(normalized_size)
                     else:
-                        node_sizes.append(20)  # Tamaño por defecto
+                        node_sizes.append(30)  # Tamaño por defecto
                 else:
-                    node_sizes.append(20)
+                    node_sizes.append(30)
             else:
                 # Tamaño basado en grado del nodo
                 degree = G.degree(node)
-                # Normalizar entre 10 y 50
-                min_size, max_size = 10, 50
+                # Normalizar entre 20 y 60
+                min_size, max_size = 20, 60
                 if G.number_of_nodes() > 1:
                     min_degree = min([G.degree(n) for n in G.nodes()])
                     max_degree = max([G.degree(n) for n in G.nodes()])
@@ -462,47 +486,65 @@ def create_sociogram(data, source_col, target_col, weight_col=None, node_size_co
                 else:
                     normalized_size = (min_size + max_size) / 2
                 node_sizes.append(normalized_size)
+
+        # Crear trazos para las aristas con colores
+        edge_traces = []
+        # Crear un colormap para las aristas basado en el nodo de origen
+        edge_colors = px.colors.qualitative.Plotly # O usa otro colormap si prefieres
         
-        # Crear trazos para las aristas
-        edge_x = []
-        edge_y = []
-        edge_weights = []
-        
-        for edge in G.edges(data=True):
-            x0, y0 = pos[edge[0]]
-            x1, y1 = pos[edge[1]]
-            edge_x.extend([x0, x1, None])
-            edge_y.extend([y0, y1, None])
-            edge_weights.append(edge[2].get('weight', 1))
+        for i, (source, target, data_edge) in enumerate(G.edges(data=True)):
+            x0, y0 = pos[source]
+            x1, y1 = pos[target]
             
+            # Asignar color basado en el nodo de origen
+            source_index = nodes.index(source) if source in nodes else 0
+            edge_color = edge_colors[source_index % len(edge_colors)]
+
+            edge_trace = go.Scatter(
+                x=[x0, x1, None],
+                y=[y0, y1, None],
+                line=dict(width=1.5, color=edge_color), # Color de la arista
+                hoverinfo='text',
+                text=f"{source} -> {target}",
+                mode='lines',
+                showlegend=False,
+                name=f"Edge {i}"
+            )
+            edge_traces.append(edge_trace)
+
         # Crear figura Plotly
         fig = go.Figure()
-        
         # Agregar aristas
-        fig.add_trace(go.Scatter(
-            x=edge_x, y=edge_y,
-            line=dict(width=1, color='#888'),
-            hoverinfo='none',
-            mode='lines',
-            showlegend=False
-        ))
-        
-        # Agregar nodos
+        for trace in edge_traces:
+             fig.add_trace(trace)
+        # Agregar nodos (círculos)
         fig.add_trace(go.Scatter(
             x=node_x, y=node_y,
-            mode='markers+text',
+            mode='markers',
             hoverinfo='text',
-            text=node_text,
-            textposition="middle center",
+            text=node_text, # Texto para hover
             marker=dict(
                 showscale=False,
-                color='lightblue',
+                color=node_colors_plotly, # Aplicar colores únicos a los nodos
                 size=node_sizes,
-                line=dict(width=2, color='darkblue')
+                line=dict(width=2, color='DarkSlateGrey')
             ),
-            showlegend=False
+            showlegend=False,
+            name='Nodos'
         ))
-        
+        # Agregar etiquetas de texto separadas
+        fig.add_trace(go.Scatter(
+            x=node_labels_x, y=node_labels_y,
+            mode='text',
+            text=node_text,
+            textposition="middle center",
+            textfont=dict(
+                size=10, # Tamaño de fuente ajustado
+                color='black'
+            ),
+            showlegend=False,
+            hoverinfo='skip' # Evitar hover en las etiquetas
+        ))
         # Actualizar layout
         fig.update_layout(
             title="Sociograma",
@@ -519,9 +561,7 @@ def create_sociogram(data, source_col, target_col, weight_col=None, node_size_co
             yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
             height=600
         )
-        
         return fig, None
-        
     except Exception as e:
         return None, f"Error al generar el sociograma: {str(e)}"
 
@@ -552,37 +592,40 @@ def generate_pdf_report(filtered_df, plots_data, stats, filename="reporte_analit
     # Gráficos
     pdf.add_section_title("Visualizaciones")
     temp_files = []  # Lista para almacenar rutas de archivos temporales
-    for plot_data in plots_data:
-        if plot_data['type'] == 'plot':
+    try: # Bloque try para manejar errores de escritura de imagen
+        for plot_data in plots_data:
+            if plot_data['type'] == 'plot':
+                try:
+                    # Crear archivo temporal con nombre único
+                    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+                    temp_files.append(temp_file.name)  # Guardar la ruta
+                    temp_file.close()  # Cerrar el archivo inmediatamente
+                    # Escribir la imagen
+                    plot_data['fig'].write_image(temp_file.name)
+                    pdf.add_plot(temp_file.name, plot_data['caption'])
+                except Exception as e:
+                    st.error(f"Error al procesar gráfico para PDF: {str(e)}")
+            elif plot_data['type'] == 'table':
+                pdf.add_table(plot_data['data'], plot_data['caption'])
+        # Datos completos
+        pdf.add_page()
+        pdf.add_section_title("Datos Filtrados (Muestra)")
+        sample_data = filtered_df.head(50).reset_index(drop=True)
+        pdf.add_table(sample_data, f"Muestra de {len(sample_data)} registros (de {len(filtered_df)} totales)")
+        # Guardar PDF
+        pdf_bytes = pdf.output(dest='S').encode('latin1')
+    finally:
+        # Limpiar archivos temporales después de cerrar todo, incluso si hay errores
+        for temp_file in temp_files:
             try:
-                # Crear archivo temporal con nombre único
-                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-                temp_files.append(temp_file.name)  # Guardar la ruta
-                temp_file.close()  # Cerrar el archivo inmediatamente
-                # Escribir la imagen
-                plot_data['fig'].write_image(temp_file.name)
-                pdf.add_plot(temp_file.name, plot_data['caption'])
+                os.unlink(temp_file)
             except Exception as e:
-                st.error(f"Error al procesar gráfico: {str(e)}")
-        elif plot_data['type'] == 'table':
-            pdf.add_table(plot_data['data'], plot_data['caption'])
-    # Datos completos
-    pdf.add_page()
-    pdf.add_section_title("Datos Filtrados (Muestra)")
-    sample_data = filtered_df.head(50).reset_index(drop=True)
-    pdf.add_table(sample_data, f"Muestra de {len(sample_data)} registros (de {len(filtered_df)} totales)")
-    # Guardar PDF
-    pdf_bytes = pdf.output(dest='S').encode('latin1')
-    # Limpiar archivos temporales después de cerrar todo
-    for temp_file in temp_files:
-        try:
-            os.unlink(temp_file)
-        except Exception as e:
-            st.error(f"Error al eliminar archivo temporal {temp_file}: {str(e)}")
+                # No mostrar error si el archivo ya no existe
+                pass 
     return pdf_bytes
 
 def main():
-    st.title("🚀 Excel Analytics Pro+")
+    st.title("🚀 MAPEO DE ACTORES - VALLE CHANCAY - ZAÑA")
     st.markdown("---")
     uploaded_file = st.file_uploader(
         "Sube tu archivo Excel",
@@ -601,9 +644,12 @@ def main():
     if not isinstance(filtered_df, pd.DataFrame):
         st.error(filter_error)
         return
-    # Almacenar gráficos para el reporte
+    
+    # Inicializar estado del reporte solo si no existe
     if 'report_plots' not in st.session_state:
         st.session_state.report_plots = []
+    # stats se inicializa en tab2, no aquí
+
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📋 Datos Filtrados", 
         "📈 Análisis", 
@@ -660,8 +706,9 @@ def main():
             st.metric("Columnas", len(filtered_df.columns))
             st.write("Valores nulos:")
             st.json(filtered_df.isnull().sum().to_dict())
-        # Guardar estadísticas para el reporte
-        st.session_state.report_stats = stats
+        # Guardar estadísticas para el reporte solo si no existen o están vacías
+        if 'report_stats' not in st.session_state or st.session_state.report_stats.empty:
+            st.session_state.report_stats = stats
     with tab3:
         plot_type = st.selectbox(
             "Tipo de gráfico",
@@ -772,7 +819,7 @@ def main():
         else:
             st.warning("Se necesita al menos 1 columna numérica para el radar")
     with tab5:
-        st.subheader("Matriz de Poder vs. Interés")
+        st.subheader("Matriz de Interesados")
         if isinstance(filtered_df, pd.DataFrame):
             numeric_cols = filtered_df.select_dtypes(include='number').columns.tolist()
             text_cols = filtered_df.select_dtypes(exclude='number').columns.tolist()
@@ -827,13 +874,11 @@ def main():
         Un sociograma es una representación visual de las relaciones entre individuos en un grupo.
         Para crearlo, necesitas datos que indiquen quién se relaciona con quién.
         """)
-        
         if isinstance(filtered_df, pd.DataFrame):
             # Verificar que haya al menos 2 columnas
             if len(filtered_df.columns) >= 2:
                 text_cols = filtered_df.select_dtypes(include=['object', 'string']).columns.tolist()
                 numeric_cols = filtered_df.select_dtypes(include='number').columns.tolist()
-                
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     source_col = st.selectbox("Columna de ORIGEN", text_cols, key="source_col")
@@ -843,9 +888,7 @@ def main():
                     weight_col = st.selectbox("Columna de PESO (opcional)", [None] + numeric_cols, key="weight_col")
                 with col4:
                     layout = st.selectbox("Diseño", ['circular', 'spring', 'random'], key="layout")
-                
                 node_size_col = st.selectbox("Tamaño de nodos (opcional)", [None] + numeric_cols + text_cols, key="node_size_col")
-                
                 if st.button("Generar Sociograma", key="sociogram_button"):
                     if source_col and target_col:
                         with st.spinner("Creando sociograma..."):
@@ -864,7 +907,6 @@ def main():
                                 'fig': fig,
                                 'caption': f"Sociograma: {source_col} → {target_col}"
                             })
-                            
                             # Mostrar estadísticas de la red
                             st.subheader("Estadísticas de la Red")
                             # Creamos un grafo temporal para calcular estadísticas
@@ -884,7 +926,6 @@ def main():
                                         G[s][t]['weight'] += w
                                     else:
                                         G.add_edge(s, t, weight=w)
-                                        
                             col1, col2, col3, col4 = st.columns(4)
                             col1.metric("Nodos", G.number_of_nodes())
                             col2.metric("Aristas", G.number_of_edges())
@@ -893,7 +934,6 @@ def main():
                                 col3.metric("Densidad", f"{density:.3f}")
                             else:
                                 col3.metric("Densidad", "N/A")
-                                
                             if G.number_of_nodes() > 0:
                                 avg_degree = sum(dict(G.degree()).values()) / G.number_of_nodes()
                                 col4.metric("Grado promedio", f"{avg_degree:.2f}")
@@ -915,16 +955,20 @@ def main():
         - Resumen ejecutivo
         """)
         report_name = st.text_input("Nombre del reporte", "Reporte_Analitico")
+        # Verificar si hay datos para el reporte
+        has_plots = 'report_plots' in st.session_state and len(st.session_state.report_plots) > 0
+        has_stats = 'report_stats' in st.session_state and not st.session_state.report_stats.empty
+
         if st.button("Generar Reporte PDF"):
-            if 'report_stats' not in st.session_state:
+            if not (has_plots or has_stats):
                 st.warning("Realiza al menos un análisis para generar el reporte")
                 return
             with st.spinner("Generando reporte PDF..."):
                 try:
                     pdf_bytes = generate_pdf_report(
                         filtered_df,
-                        st.session_state.report_plots,
-                        st.session_state.report_stats,
+                        st.session_state.report_plots if has_plots else [],
+                        st.session_state.report_stats if has_stats else pd.DataFrame(),
                         f"{report_name}.pdf"
                     )
                     st.success("✅ Reporte generado con éxito!")
