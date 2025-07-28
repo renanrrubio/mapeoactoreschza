@@ -12,6 +12,9 @@ import plotly.io as pio
 import networkx as nx
 import numpy as np
 import colorsys
+import xml.etree.ElementTree as ET # Para generar KML
+import folium
+from streamlit_folium import st_folium
 
 # Configuración de Plotly
 pio.kaleido.scope.mathjax = None
@@ -24,6 +27,8 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# --- FUNCIONES DE UTILIDAD ---
+
 # Función para resetear el estado del reporte
 def reset_report_state():
     """Reinicia el estado del reporte en session_state."""
@@ -32,7 +37,21 @@ def reset_report_state():
     if 'report_stats' in st.session_state:
         del st.session_state['report_stats']
 
-# Clase para generar PDF (con fuente Arial)
+# Función auxiliar segura para convertir Hex a RGB
+def hex_to_rgb_safe(hex_color):
+    """Convierte un color hexadecimal a una tupla RGB (0-255). Maneja errores."""
+    if not isinstance(hex_color, str):
+        return (0, 123, 255) # Azul por defecto
+    hex_color = hex_color.lstrip('#')
+    if len(hex_color) != 6:
+        return (0, 123, 255) # Azul por defecto
+    try:
+        return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return (0, 123, 255) # Azul por defecto
+
+# --- FUNCIONES PARA PDF ---
+
 class PDFReport(FPDF):
     def __init__(self):
         super().__init__()
@@ -82,7 +101,170 @@ class PDFReport(FPDF):
             self.ln(row_height)
         self.ln(5)
 
-# Cache de datos
+# --- FUNCIONES PARA KML ---
+
+def generate_kml(data, lat_col, lon_col, name_col=None, description_cols=None, style_col=None, filename="mapa.kml"):
+    """
+    Genera un archivo KML a partir de coordenadas.
+    """
+    try:
+        kml = ET.Element("kml", xmlns="http://www.opengis.net/kml/2.2")
+        document = ET.SubElement(kml, "Document")
+        ET.SubElement(document, "name").text = filename.replace(".kml", "")
+
+        styles = {}
+        if style_col and style_col in data.columns:
+            unique_styles = data[style_col].dropna().unique()
+            color_palette = px.colors.qualitative.Set1
+            for i, style_value in enumerate(unique_styles):
+                style_id = f"style_{i}"
+                styles[str(style_value)] = style_id
+                style_element = ET.SubElement(document, "Style", id=style_id)
+                icon_style = ET.SubElement(style_element, "IconStyle")
+                hex_color = color_palette[i % len(color_palette)].lstrip('#')
+                kml_color = f"ff{hex_color[4:6]}{hex_color[2:4]}{hex_color[0:2]}"
+                ET.SubElement(icon_style, "color").text = kml_color
+                ET.SubElement(icon_style, "scale").text = "1.0"
+                icon = ET.SubElement(icon_style, "Icon")
+                ET.SubElement(icon, "href").text = "http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png"
+        
+        for index, row in data.iterrows():
+            placemark = ET.SubElement(document, "Placemark")
+            
+            name_text = str(row[name_col]) if name_col and name_col in data.columns and pd.notna(row[name_col]) else f"Ubicación {index+1}"
+            ET.SubElement(placemark, "name").text = name_text
+
+            if description_cols:
+                desc_lines = [f"{col}: {row[col]}" for col in description_cols if col in data.columns and pd.notna(row[col])]
+                if desc_lines:
+                    desc_element = ET.SubElement(placemark, "description")
+                    desc_element.text = "<![CDATA[" + "<br>".join(desc_lines) + "]]>"
+
+            if style_col and style_col in data.columns and pd.notna(row[style_col]):
+                style_key = str(row[style_col])
+                if style_key in styles:
+                     ET.SubElement(placemark, "styleUrl").text = f"#{styles[style_key]}"
+
+            try:
+                lat = float(row[lat_col])
+                lon = float(row[lon_col])
+                coordinates_text = f"{lon},{lat},0"
+                point = ET.SubElement(placemark, "Point")
+                ET.SubElement(point, "coordinates").text = coordinates_text
+            except (ValueError, TypeError):
+                 continue
+
+        tree = ET.ElementTree(kml)
+        kml_buffer = BytesIO()
+        tree.write(kml_buffer, encoding='utf-8', xml_declaration=True)
+        kml_buffer.seek(0)
+        return kml_buffer.getvalue()
+
+    except Exception as e:
+        st.error(f"Error al generar KML: {e}")
+        return None
+
+# --- FUNCIONES PARA MAPA FOLIUM ---
+
+def create_folium_map(data, lat_col, lon_col, name_col=None, popup_cols=None, style_col=None):
+    """
+    Crea un mapa interactivo usando Folium.
+    """
+    try:
+        valid_coords_df = data.dropna(subset=[lat_col, lon_col])
+        try:
+            valid_coords_df = valid_coords_df[pd.to_numeric(valid_coords_df[lat_col], errors='coerce').notnull() &
+                                              pd.to_numeric(valid_coords_df[lon_col], errors='coerce').notnull()]
+        except Exception:
+            pass
+
+        if valid_coords_df.empty:
+            return None, "No hay datos válidos para mostrar en el mapa."
+
+        center_lat = valid_coords_df[lat_col].mean()
+        center_lon = valid_coords_df[lon_col].mean()
+        
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=10, control_scale=True)
+        
+        # --- Corrección: Siempre crear un grupo 'default' ---
+        feature_groups = {}
+        default_fg = folium.FeatureGroup(name="Todos los puntos")
+        default_rgb = (0, 123, 255)
+        feature_groups['default'] = {'group': default_fg, 'color': default_rgb}
+        default_fg.add_to(m)
+
+        # --- Corrección: Sobrescribir o añadir grupos si hay style_col válida ---
+        if style_col and style_col in valid_coords_df.columns:
+            unique_styles = valid_coords_df[style_col].dropna().unique()
+            if len(unique_styles) > 0: # Solo si hay estilos válidos
+                color_palette = px.colors.qualitative.Plotly 
+
+                for i, style_value in enumerate(unique_styles):
+                    style_key = str(style_value)
+                    hex_color = color_palette[i % len(color_palette)]
+                    rgb_color = hex_to_rgb_safe(hex_color) 
+                    
+                    fg = folium.FeatureGroup(name=style_key)
+                    feature_groups[style_key] = {'group': fg, 'color': rgb_color}
+                    fg.add_to(m)
+                # Si se crearon grupos específicos, el 'default' sigue existiendo pero no se usa necesariamente
+            # Si unique_styles está vacío, se queda con el 'default'
+
+        # --- Corrección en el bucle de marcadores ---
+        for _, row in valid_coords_df.iterrows():
+            try:
+                lat = float(row[lat_col])
+                lon = float(row[lon_col])
+            except (ValueError, TypeError):
+                continue
+
+            # --- Corrección: Acceder de forma segura ---
+            group_key = 'default'
+            # Obtener el diccionario del grupo de forma segura
+            group_info = feature_groups.get(group_key, feature_groups.get('default', {'color': (0, 123, 255), 'group': list(feature_groups.values())[0]['group'] if feature_groups else default_fg}))
+            marker_color = group_info['color']
+
+            if style_col and style_col in valid_coords_df.columns and pd.notna(row[style_col]):
+                style_val_key = str(row[style_col])
+                if style_val_key in feature_groups:
+                    group_key = style_val_key
+                    group_info = feature_groups[group_key] # Acceder al grupo correcto
+                    marker_color = group_info['color']
+
+            current_fg = group_info['group'] # Usar el grupo del diccionario obtenido
+
+            # ... (resto del código para crear el marcador) ...
+            popup_content = ""
+            if popup_cols:
+                 popup_lines = [f"<b>{col}:</b> {row[col]}" for col in popup_cols if col in valid_coords_df.columns and pd.notna(row[col])]
+                 popup_content = "<br>".join(popup_lines)
+            else:
+                popup_name = str(row[name_col]) if name_col and name_col in valid_coords_df.columns and pd.notna(row[name_col]) else f"Punto ({lat:.4f}, {lon:.4f})"
+                popup_content = f"<b>{popup_name}</b>"
+
+            tooltip_text = str(row[name_col]) if name_col and name_col in valid_coords_df.columns and pd.notna(row[name_col]) else f"ID: {_}"
+
+            r, g, b = marker_color
+            brightness = (r * 299 + g * 587 + b * 114) / 1000
+            icon_color_str = 'white' if brightness < 128 else 'black'
+
+            folium.Marker(
+                location=[lat, lon],
+                popup=folium.Popup(popup_content, max_width=300),
+                tooltip=tooltip_text,
+                icon=folium.Icon(color='lightgray', icon_color=icon_color_str, icon='map-marker', prefix='fa')
+            ).add_to(current_fg) # Añadir al grupo correcto
+
+        if len(feature_groups) > 1: # Solo mostrar control si hay más de un grupo
+            folium.LayerControl().add_to(m)
+
+        return m, None
+    except Exception as e:
+        # Proporcionar más detalles del error puede ser útil
+        return None, f"Error al crear el mapa: {str(e)}"
+
+# --- FUNCIONES DE CARGA Y FILTRO DE DATOS ---
+
 @st.cache_data(show_spinner="Cargando y procesando datos...", hash_funcs={BytesIO: lambda _: None})
 def load_and_process(file, sheet_name=None):
     """Carga y valida el archivo Excel"""
@@ -97,7 +279,6 @@ def load_and_process(file, sheet_name=None):
         engines = ['openpyxl', 'xlrd']
         for engine in engines:
             try:
-                # Reiniciar el puntero del archivo
                 file.seek(0)
                 excel_data = pd.ExcelFile(BytesIO(file.read()), engine=engine)
                 df = pd.read_excel(excel_data, sheet_name=sheet_name) if sheet_name else pd.read_excel(excel_data)
@@ -143,6 +324,8 @@ def setup_sidebar_filters(df):
         )
         filtered_df = filtered_df[filtered_df[col].isin(selected_vals)]
     return filtered_df, None
+
+# --- FUNCIONES DE VISUALIZACIÓN ---
 
 def create_optimized_radar(data, metrics, category=None):
     """Genera radar con SOLO LÍNEAS (y acepta ≥1 métrica)"""
@@ -220,12 +403,10 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
         if missing_cols:
             return None, f"Columnas faltantes: {', '.join(missing_cols)}"
         fig = go.Figure()
-        # Calcular máximos para los ejes
         max_power = data[power_col].max() * 1.1
         max_interest = data[interest_col].max() * 1.1
         power_mid = max_power / 2
         interest_mid = max_interest / 2
-        # Clasificar stakeholders por cuadrante
         data['cuadrante'] = data.apply(
             lambda row: (
                 "Gestionar Activamente" if (row[power_col] >= power_mid and row[interest_col] >= interest_mid) else
@@ -234,7 +415,6 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
                 "Mantener Informados"
             ), axis=1
         )
-        # Scatter plot con colores por cuadrante
         for cuadrante, color in zip(
             ["Gestionar Activamente", "Monitorear", "Mantener Satisfechos", "Mantener Informados"],
             ['#2ca02c', '#1f77b4', '#ff7f0e', '#d62728']
@@ -257,14 +437,12 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
                         axis=1
                     )
                 ))
-        # Líneas divisorias
         fig.add_shape(type="line", 
                      x0=power_mid, y0=0, x1=power_mid, y1=max_interest, 
                      line=dict(color="gray", width=2, dash="dot"))
         fig.add_shape(type="line", 
                      x0=0, y0=interest_mid, x1=max_power, y1=interest_mid,
                      line=dict(color="gray", width=2, dash="dot"))
-        # Fondos semitransparentes
         fig.add_shape(type="rect",
             x0=0, y0=interest_mid, x1=power_mid, y1=max_interest,
             fillcolor="rgba(173, 216, 230, 0.1)",
@@ -285,9 +463,7 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
             fillcolor="rgba(255, 182, 193, 0.1)",
             line=dict(width=0)
         )
-        # Contar elementos por cuadrante
         counts = data['cuadrante'].value_counts().to_dict()
-        # Configuración del layout
         fig.update_layout(
             title="Matriz de Poder vs. Interés",
             xaxis_title="Poder",
@@ -357,19 +533,8 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
 def create_sociogram(data, source_col, target_col, weight_col=None, node_size_col=None, layout='circular'):
     """
     Crea un sociograma (diagrama de red) a partir de datos de relaciones.
-    Parámetros:
-    - data: DataFrame con los datos
-    - source_col: Columna que contiene los nodos de origen
-    - target_col: Columna que contiene los nodos de destino
-    - weight_col: Columna opcional para el peso de las conexiones
-    - node_size_col: Columna opcional para el tamaño de los nodos
-    - layout: Tipo de disposición ('circular', 'spring', 'random')
-    Retorna:
-    - fig: Objeto Plotly Figure
-    - error: Mensaje de error si ocurre
     """
     try:
-        # Validaciones iniciales
         if not isinstance(data, pd.DataFrame):
             return None, "Los datos deben ser un DataFrame de pandas"
         if data.empty:
@@ -378,23 +543,17 @@ def create_sociogram(data, source_col, target_col, weight_col=None, node_size_co
         missing_cols = [col for col in required_cols if col not in data.columns]
         if missing_cols:
             return None, f"Faltan columnas requeridas: {', '.join(missing_cols)}"
-        # Eliminar filas con valores nulos en las columnas de interés
         clean_data = data.dropna(subset=[source_col, target_col])
         if clean_data.empty:
             return None, "No hay datos válidos después de eliminar filas con valores nulos"
-        # Crear grafo dirigido
         G = nx.DiGraph()
-        # Agregar nodos y aristas
         for _, row in clean_data.iterrows():
             source = str(row[source_col])
             target = str(row[target_col])
-            # Omitir auto-bucles
             if source == target:
                 continue
-            # Agregar nodos
             G.add_node(source)
             G.add_node(target)
-            # Agregar o actualizar arista
             if weight_col and weight_col in data.columns:
                 try:
                     weight = float(row[weight_col]) if pd.notna(row[weight_col]) else 1.0
@@ -410,9 +569,8 @@ def create_sociogram(data, source_col, target_col, weight_col=None, node_size_co
             return None, "No se pudieron crear nodos a partir de los datos"
         
         # --- Mejora en el layout para reducir cruces ---
-        # Ajustar parámetros para mejor distribución en spring layout
         if layout == 'spring':
-             # Aumentar iteraciones y ajustar k para separar más los nodos
+            # Aumentar iteraciones y ajustar k para separar más los nodos
             pos = nx.spring_layout(G, k=5/np.sqrt(G.number_of_nodes()), iterations=100, seed=42) 
         elif layout == 'circular':
             pos = nx.circular_layout(G)
@@ -424,41 +582,34 @@ def create_sociogram(data, source_col, target_col, weight_col=None, node_size_co
         # --- Generar colores únicos para nodos ---
         nodes = list(G.nodes())
         num_nodes = len(nodes)
-        # Generar colores HSV distribuidos uniformemente
         hues = np.linspace(0, 1, num_nodes, endpoint=False)
-        # Convertir HSV a RGB
         node_colors = {}
         for i, node in enumerate(nodes):
-            rgb = colorsys.hsv_to_rgb(hues[i], 0.8, 0.8) # Saturación y valor ajustables
-            # Convertir a valores de 0-255 para Plotly
+            rgb = colorsys.hsv_to_rgb(hues[i], 0.8, 0.8)
             node_colors[node] = tuple(int(c * 255) for c in rgb)
 
-        # Extraer coordenadas
+        # Extraer coordenadas y propiedades
         node_x = []
         node_y = []
         node_text = []
         node_sizes = []
         node_labels_x = []
         node_labels_y = []
-        node_colors_plotly = [] # Para los colores de los nodos
+        node_colors_plotly = []
         
         for node in G.nodes():
             x, y = pos[node]
             node_x.append(x)
             node_y.append(y)
             node_text.append(node)
-            node_colors_plotly.append(f'rgb{node_colors[node]}') # Color del nodo
-            # Posición ligeramente desplazada para la etiqueta
+            node_colors_plotly.append(f'rgb{node_colors[node]}')
             node_labels_x.append(x)
-            node_labels_y.append(y - 0.04) # Desplazar hacia abajo
-            # Tamaño de nodo basado en grado o columna proporcionada
+            node_labels_y.append(y - 0.04)
             if node_size_col and node_size_col in data.columns:
-                # Usar valor promedio de la columna para este nodo
                 node_data = data[(data[source_col].astype(str) == node) | (data[target_col].astype(str) == node)]
                 if not node_data.empty and pd.api.types.is_numeric_dtype(data[node_size_col]):
                     size_val = node_data[node_size_col].mean()
                     if pd.notna(size_val):
-                        # Normalizar tamaño (ej. entre 20 y 60)
                         min_size, max_size = 20, 60
                         min_val = data[node_size_col].min()
                         max_val = data[node_size_col].max()
@@ -468,13 +619,11 @@ def create_sociogram(data, source_col, target_col, weight_col=None, node_size_co
                             normalized_size = (min_size + max_size) / 2
                         node_sizes.append(normalized_size)
                     else:
-                        node_sizes.append(30)  # Tamaño por defecto
+                        node_sizes.append(30)
                 else:
                     node_sizes.append(30)
             else:
-                # Tamaño basado en grado del nodo
                 degree = G.degree(node)
-                # Normalizar entre 20 y 60
                 min_size, max_size = 20, 60
                 if G.number_of_nodes() > 1:
                     min_degree = min([G.degree(n) for n in G.nodes()])
@@ -489,21 +638,18 @@ def create_sociogram(data, source_col, target_col, weight_col=None, node_size_co
 
         # Crear trazos para las aristas con colores
         edge_traces = []
-        # Crear un colormap para las aristas basado en el nodo de origen
-        edge_colors = px.colors.qualitative.Plotly # O usa otro colormap si prefieres
+        edge_colors = px.colors.qualitative.Plotly
         
         for i, (source, target, data_edge) in enumerate(G.edges(data=True)):
             x0, y0 = pos[source]
             x1, y1 = pos[target]
-            
-            # Asignar color basado en el nodo de origen
             source_index = nodes.index(source) if source in nodes else 0
             edge_color = edge_colors[source_index % len(edge_colors)]
 
             edge_trace = go.Scatter(
                 x=[x0, x1, None],
                 y=[y0, y1, None],
-                line=dict(width=1.5, color=edge_color), # Color de la arista
+                line=dict(width=1.5, color=edge_color),
                 hoverinfo='text',
                 text=f"{source} -> {target}",
                 mode='lines',
@@ -512,51 +658,39 @@ def create_sociogram(data, source_col, target_col, weight_col=None, node_size_co
             )
             edge_traces.append(edge_trace)
 
-        # Crear figura Plotly
         fig = go.Figure()
-        # Agregar aristas
         for trace in edge_traces:
              fig.add_trace(trace)
-        # Agregar nodos (círculos)
         fig.add_trace(go.Scatter(
             x=node_x, y=node_y,
             mode='markers',
             hoverinfo='text',
-            text=node_text, # Texto para hover
+            text=node_text,
             marker=dict(
                 showscale=False,
-                color=node_colors_plotly, # Aplicar colores únicos a los nodos
+                color=node_colors_plotly,
                 size=node_sizes,
                 line=dict(width=2, color='DarkSlateGrey')
             ),
             showlegend=False,
             name='Nodos'
         ))
-        # Agregar etiquetas de texto separadas
         fig.add_trace(go.Scatter(
             x=node_labels_x, y=node_labels_y,
             mode='text',
             text=node_text,
             textposition="middle center",
-            textfont=dict(
-                size=10, # Tamaño de fuente ajustado
-                color='black'
-            ),
+            textfont=dict(size=10, color='black'),
             showlegend=False,
-            hoverinfo='skip' # Evitar hover en las etiquetas
+            hoverinfo='skip'
         ))
-        # Actualizar layout
         fig.update_layout(
             title="Sociograma",
             title_x=0.5,
             showlegend=False,
             hovermode='closest',
             margin=dict(b=20,l=5,r=5,t=40),
-            annotations=[ dict(
-                text="",
-                showarrow=False,
-                xref="paper", yref="paper",
-                x=0.005, y=-0.002 ) ],
+            annotations=[ dict(text="", showarrow=False, xref="paper", yref="paper", x=0.005, y=-0.002 ) ],
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
             yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
             height=600
@@ -573,7 +707,6 @@ def show_record_details(record):
 def generate_pdf_report(filtered_df, plots_data, stats, filename="reporte_analitico.pdf"):
     pdf = PDFReport()
     pdf.add_page()
-    # Portada
     pdf.set_font('Arial', 'B', 16)
     pdf.cell(0, 20, "Reporte Analítico Completo", 0, 1, 'C')
     pdf.ln(10)
@@ -582,47 +715,40 @@ def generate_pdf_report(filtered_df, plots_data, stats, filename="reporte_analit
     pdf.multi_cell(0, 8, f"Total de registros: {len(filtered_df)}")
     pdf.multi_cell(0, 8, f"Total de columnas: {len(filtered_df.columns)}")
     pdf.ln(15)
-    # Resumen ejecutivo
     pdf.add_section_title("Resumen Ejecutivo")
     pdf.multi_cell(0, 8, "Este reporte contiene un análisis completo de los datos cargados en la aplicación Excel Analytics Pro+, incluyendo visualizaciones, estadísticas descriptivas y los datos filtrados según los criterios seleccionados.")
     pdf.ln(10)
-    # Estadísticas descriptivas
     pdf.add_section_title("Estadísticas Descriptivas")
     pdf.add_table(stats.describe().round(2).reset_index().rename(columns={'index': 'metric'}), "Estadísticas principales")
-    # Gráficos
     pdf.add_section_title("Visualizaciones")
-    temp_files = []  # Lista para almacenar rutas de archivos temporales
+    temp_files = []
     try: # Bloque try para manejar errores de escritura de imagen
         for plot_data in plots_data:
             if plot_data['type'] == 'plot':
                 try:
-                    # Crear archivo temporal con nombre único
                     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-                    temp_files.append(temp_file.name)  # Guardar la ruta
-                    temp_file.close()  # Cerrar el archivo inmediatamente
-                    # Escribir la imagen
+                    temp_files.append(temp_file.name)
+                    temp_file.close()
                     plot_data['fig'].write_image(temp_file.name)
                     pdf.add_plot(temp_file.name, plot_data['caption'])
                 except Exception as e:
                     st.error(f"Error al procesar gráfico para PDF: {str(e)}")
             elif plot_data['type'] == 'table':
                 pdf.add_table(plot_data['data'], plot_data['caption'])
-        # Datos completos
         pdf.add_page()
         pdf.add_section_title("Datos Filtrados (Muestra)")
         sample_data = filtered_df.head(50).reset_index(drop=True)
         pdf.add_table(sample_data, f"Muestra de {len(sample_data)} registros (de {len(filtered_df)} totales)")
-        # Guardar PDF
         pdf_bytes = pdf.output(dest='S').encode('latin1')
     finally:
-        # Limpiar archivos temporales después de cerrar todo, incluso si hay errores
         for temp_file in temp_files:
             try:
                 os.unlink(temp_file)
-            except Exception as e:
-                # No mostrar error si el archivo ya no existe
-                pass 
+            except Exception:
+                pass # Ignorar errores al eliminar
     return pdf_bytes
+
+# --- FUNCIÓN PRINCIPAL ---
 
 def main():
     st.title("🚀 MAPEO DE ACTORES - VALLE CHANCAY - ZAÑA")
@@ -648,17 +774,18 @@ def main():
     # Inicializar estado del reporte solo si no existe
     if 'report_plots' not in st.session_state:
         st.session_state.report_plots = []
-    # stats se inicializa en tab2, no aquí
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "📋 Datos Filtrados", 
         "📈 Análisis", 
         "📊 Visualizaciones", 
         "🕷️ Radar",
         "🔄 Matriz Poder-Interés",
         "👥 Sociograma",
+        "gMaps", # Nueva pestaña para Georreferenciación
         "📑 Generar Reporte"
     ])
+    
     with tab1:
         st.subheader("🔍 Buscador Avanzado")
         search_cols = st.multiselect(
@@ -706,9 +833,8 @@ def main():
             st.metric("Columnas", len(filtered_df.columns))
             st.write("Valores nulos:")
             st.json(filtered_df.isnull().sum().to_dict())
-        # Guardar estadísticas para el reporte solo si no existen o están vacías
-        if 'report_stats' not in st.session_state or st.session_state.report_stats.empty:
-            st.session_state.report_stats = stats
+        # Guardar estadísticas para el reporte
+        st.session_state.report_stats = stats
     with tab3:
         plot_type = st.selectbox(
             "Tipo de gráfico",
@@ -819,7 +945,7 @@ def main():
         else:
             st.warning("Se necesita al menos 1 columna numérica para el radar")
     with tab5:
-        st.subheader("Matriz de Interesados")
+        st.subheader("Matriz de Poder vs. Interés")
         if isinstance(filtered_df, pd.DataFrame):
             numeric_cols = filtered_df.select_dtypes(include='number').columns.tolist()
             text_cols = filtered_df.select_dtypes(exclude='number').columns.tolist()
@@ -868,14 +994,13 @@ def main():
                 st.warning("Se necesitan al menos 2 columnas numéricas y 1 columna de texto")
         else:
             st.warning("Carga y filtra los datos primero")
-    with tab6:  # Nueva pestaña para Sociograma
+    with tab6:
         st.subheader("👥 Sociograma (Diagrama de Red)")
         st.markdown("""
         Un sociograma es una representación visual de las relaciones entre individuos en un grupo.
         Para crearlo, necesitas datos que indiquen quién se relaciona con quién.
         """)
         if isinstance(filtered_df, pd.DataFrame):
-            # Verificar que haya al menos 2 columnas
             if len(filtered_df.columns) >= 2:
                 text_cols = filtered_df.select_dtypes(include=['object', 'string']).columns.tolist()
                 numeric_cols = filtered_df.select_dtypes(include='number').columns.tolist()
@@ -907,14 +1032,12 @@ def main():
                                 'fig': fig,
                                 'caption': f"Sociograma: {source_col} → {target_col}"
                             })
-                            # Mostrar estadísticas de la red
                             st.subheader("Estadísticas de la Red")
-                            # Creamos un grafo temporal para calcular estadísticas
                             temp_data = filtered_df.dropna(subset=[source_col, target_col])
                             G = nx.DiGraph()
                             for _, row in temp_data.iterrows():
                                 s, t = str(row[source_col]), str(row[target_col])
-                                if s != t:  # No auto-bucles
+                                if s != t:
                                     if weight_col and weight_col in filtered_df.columns:
                                         try:
                                             w = float(row[weight_col]) if pd.notna(row[weight_col]) else 1.0
@@ -945,7 +1068,119 @@ def main():
                 st.warning("Se necesitan al menos 2 columnas para crear un sociograma")
         else:
             st.warning("Carga y filtra los datos primero")
-    with tab7:
+    # --- NUEVA PESTAÑA: Georreferenciación ---
+    with tab7: #gMaps
+        st.subheader("gMaps")
+        st.markdown("""
+        Visualiza datos geográficos en un mapa interactivo y genera un archivo KML para Google Earth.
+        Asegúrate de que tu archivo Excel tenga columnas con **Latitud** y **Longitud** en formato decimal.
+        """)
+        
+        if isinstance(filtered_df, pd.DataFrame) and not filtered_df.empty:
+            potential_lat_cols = [col for col in filtered_df.columns if 'lat' in col.lower() and pd.api.types.is_numeric_dtype(filtered_df[col])]
+            potential_lon_cols = [col for col in filtered_df.columns if ('lon' in col.lower() or 'lng' in col.lower()) and pd.api.types.is_numeric_dtype(filtered_df[col])]
+            all_numeric_cols = filtered_df.select_dtypes(include='number').columns.tolist()
+            all_cols = filtered_df.columns.tolist()
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                lat_col = st.selectbox(
+                    "Columna de LATITUD",
+                    all_numeric_cols,
+                    index=all_numeric_cols.index(potential_lat_cols[0]) if potential_lat_cols else 0,
+                    key="gmaps_lat_col"
+                )
+            with col2:
+                lon_col = st.selectbox(
+                    "Columna de LONGITUD",
+                    all_numeric_cols,
+                    index=all_numeric_cols.index(potential_lon_cols[0]) if potential_lon_cols else (1 if len(all_numeric_cols) > 1 else 0),
+                    key="gmaps_lon_col"
+                )
+            with col3:
+                name_col_options = [None] + all_cols
+                name_col = st.selectbox(
+                    "Columna para NOMBRES (Marcadores)",
+                    name_col_options,
+                    index=0,
+                    key="gmaps_name_col",
+                    help="Selecciona una columna para usar como nombre de cada ubicación."
+                )
+
+            popup_cols = st.multiselect(
+                "Columnas para POPUP (Folium)",
+                all_cols,
+                default=[],
+                key="gmaps_popup_cols",
+                help="Selecciona columnas cuyos valores se mostrarán en el popup al hacer clic en un marcador."
+            )
+            
+            style_col = st.selectbox(
+                "Columna para ESTILOS/CAPAS (Folium/KML)",
+                [None] + all_cols,
+                index=0,
+                key="gmaps_style_col",
+                help="Selecciona una columna categórica para diferenciar grupos de marcadores por color."
+            )
+
+            description_cols = st.multiselect(
+                "Columnas para DESCRIPCIÓN (KML)",
+                all_cols,
+                default=[],
+                key="gmaps_desc_cols",
+                help="Selecciona columnas cuyos valores se incluirán en la descripción de cada punto en el KML."
+            )
+            
+            if lat_col and lon_col and lat_col != lon_col:
+                 # --- Visualización en Folium Map ---
+                st.subheader("📍 Mapa Interactivo (Folium)")
+                with st.spinner("Creando mapa interactivo..."):
+                    folium_map, map_error = create_folium_map(
+                        filtered_df, 
+                        lat_col, 
+                        lon_col, 
+                        name_col if name_col != None else None,
+                        popup_cols if popup_cols else None,
+                        style_col if style_col != None else None
+                    )
+                
+                if folium_map:
+                    st_folium(folium_map, width=1000, height=600)
+                else:
+                    st.warning(f"⚠️ {map_error}")
+
+                # --- Generación y Descarga de KML ---
+                st.subheader("🌐 Generar Archivo KML")
+                kml_filename = st.text_input("Nombre del archivo KML", "Ubicaciones_Mapeadas.kml")
+                if not kml_filename.endswith('.kml'):
+                     kml_filename += '.kml'
+                
+                if st.button("Generar y Descargar KML", key="generate_kml_button"):
+                    with st.spinner("Generando archivo KML..."):
+                        kml_bytes = generate_kml(
+                            filtered_df, 
+                            lat_col, 
+                            lon_col, 
+                            name_col if name_col != None else None,
+                            description_cols if description_cols else None,
+                            style_col if style_col != None else None,
+                            kml_filename
+                        )
+                        if kml_bytes:
+                            st.success("✅ Archivo KML generado!")
+                            st.download_button(
+                                label="Descargar KML",
+                                data=kml_bytes,
+                                file_name=kml_filename,
+                                mime="application/vnd.google-earth.kml+xml"
+                            )
+                        else:
+                            st.error("❌ Error al generar el archivo KML.")
+            else:
+                st.warning("⚠️ Por favor selecciona columnas diferentes para Latitud y Longitud.")
+        else:
+            st.warning("⚠️ Carga y filtra los datos primero. Asegúrate de que el conjunto de datos no esté vacío.")
+    with tab8:
         st.subheader("📑 Generar Reporte Completo")
         st.markdown("""
         Genera un reporte PDF con todos los análisis realizados, incluyendo:
@@ -955,24 +1190,19 @@ def main():
         - Resumen ejecutivo
         """)
         report_name = st.text_input("Nombre del reporte", "Reporte_Analitico")
-        # Verificar si hay datos para el reporte
-        has_plots = 'report_plots' in st.session_state and len(st.session_state.report_plots) > 0
-        has_stats = 'report_stats' in st.session_state and not st.session_state.report_stats.empty
-
         if st.button("Generar Reporte PDF"):
-            if not (has_plots or has_stats):
+            if 'report_stats' not in st.session_state:
                 st.warning("Realiza al menos un análisis para generar el reporte")
                 return
             with st.spinner("Generando reporte PDF..."):
                 try:
                     pdf_bytes = generate_pdf_report(
                         filtered_df,
-                        st.session_state.report_plots if has_plots else [],
-                        st.session_state.report_stats if has_stats else pd.DataFrame(),
+                        st.session_state.report_plots,
+                        st.session_state.report_stats,
                         f"{report_name}.pdf"
                     )
                     st.success("✅ Reporte generado con éxito!")
-                    # Botón de descarga
                     st.download_button(
                         label="Descargar Reporte",
                         data=pdf_bytes,
