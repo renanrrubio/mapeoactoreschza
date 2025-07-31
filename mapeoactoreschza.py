@@ -419,9 +419,9 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
         plot_data['cuadrante'] = plot_data.apply(
             lambda row: (
                 "Gestionar Activamente" if (row[power_col] >= power_mid and row[interest_col] >= interest_mid) else
-                "Monitorear" if (row[power_col] < power_mid and row[interest_col] >= interest_mid) else
+                "Mantener informados" if (row[power_col] < power_mid and row[interest_col] >= interest_mid) else
                 "Mantener Satisfechos" if (row[power_col] >= power_mid and row[interest_col] < interest_mid) else
-                "Mantener Informados"
+                "Monitorear"
             ), axis=1
         )
 
@@ -454,9 +454,9 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
         # Definir colores para cuadrantes
         quadrant_colors = {
             "Gestionar Activamente": '#2ca02c', # Verde
-            "Monitorear": '#1f77b4',           # Azul
+            "Mantener informados": '#1f77b4',           # Azul
             "Mantener Satisfechos": '#ff7f0e', # Naranja
-            "Mantener Informados": '#d62728'   # Rojo
+            "Monitorear": '#d62728'   # Rojo
         }
 
         # Contar elementos por cuadrante para incluir en la leyenda
@@ -520,16 +520,16 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
         # Rectángulos de fondo (usando los rangos calculados)
         fig.add_shape(type="rect",
             x0=x_range[0], y0=power_mid, x1=interest_mid, y1=y_range[1], # Mantener Satisfechos
-            fillcolor="rgba(173, 216, 230, 0.1)", line=dict(width=0))
+            fillcolor="rgba(255, 228, 181, 0.1)", line=dict(width=0))
         fig.add_shape(type="rect",
             x0=interest_mid, y0=power_mid, x1=x_range[1], y1=y_range[1], # Gestionar Activamente
             fillcolor="rgba(144, 238, 144, 0.1)", line=dict(width=0))
         fig.add_shape(type="rect",
             x0=x_range[0], y0=y_range[0], x1=interest_mid, y1=power_mid, # Mantener Informados
-            fillcolor="rgba(255, 228, 181, 0.1)", line=dict(width=0))
+            fillcolor="rgba(255, 182, 193, 0.1)", line=dict(width=0))
         fig.add_shape(type="rect",
             x0=interest_mid, y0=y_range[0], x1=x_range[1], y1=power_mid, # Monitorear
-            fillcolor="rgba(255, 182, 193, 0.1)", line=dict(width=0))
+            fillcolor="rgba(173, 216, 230, 0.1)", line=dict(width=0))
 
         # --- 7. Layout del Gráfico ---
         fig.update_layout(
@@ -543,16 +543,7 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(240,240,240,0.8)',
              # Etiquetas en los cuadrantes (puedes mantenerlas o eliminarlas si la leyenda es suficiente)
-            annotations=[
-                dict(x=0.25, y=0.95, xref="paper", yref="paper", text="<b>MONITOREAR</b>", showarrow=False,
-                     font=dict(size=10, color="darkblue"), bgcolor="rgba(255,255,255,0.5)", bordercolor="darkblue", borderwidth=1, borderpad=2),
-                dict(x=0.75, y=0.95, xref="paper", yref="paper", text="<b>GESTIONAR ACTIVAMENTE</b>", showarrow=False,
-                     font=dict(size=10, color="darkgreen"), bgcolor="rgba(255,255,255,0.5)", bordercolor="darkgreen", borderwidth=1, borderpad=2),
-                dict(x=0.25, y=0.05, xref="paper", yref="paper", text="<b>MANTENER INFORMADOS</b>", showarrow=False,
-                     font=dict(size=10, color="darkorange"), bgcolor="rgba(255,255,255,0.5)", bordercolor="darkorange", borderwidth=1, borderpad=2),
-                dict(x=0.75, y=0.05, xref="paper", yref="paper", text="<b>MANTENER SATISFECHOS</b>", showarrow=False,
-                     font=dict(size=10, color="firebrick"), bgcolor="rgba(255,255,255,0.5)", bordercolor="firebrick", borderwidth=1, borderpad=2)
-            ],
+            
             legend=dict(
                 orientation="h",
                 yanchor="bottom",
