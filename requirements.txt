@@ -1,10 +1,10 @@
-streamlit>=1.28.0
-pandas>=1.5.0
-plotly>=5.0.0
-fpdf>=1.7.2
-networkx>=2.8.0
-numpy>=1.21.0
-folium>=0.14.0
-streamlit_folium>=0.17.0
-openpyxl>=3.0.0
-# xlrd>=2.0.0 # Descomenta si necesitas leer archivos .xls específicamente
+streamlit
+pandas
+plotly
+fpdf
+openpyxl
+xlrd
+networkx
+numpy
+folium
+streamlit-folium
