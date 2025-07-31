@@ -145,9 +145,11 @@ def generate_kml(data, lat_col, lon_col, name_col=None, description_cols=None, s
         return None
 # --- FUNCIONES PARA MAPA FOLIUM ---
 # --- FUNCIONES PARA MAPA FOLIUM ---
+# (Reemplaza tu función create_folium_map existente con esta)
 def create_folium_map(data, lat_col, lon_col, name_col=None, popup_cols=None, style_col=None):
     """
-    Crea un mapa interactivo usando Folium con clustering para manejar superposiciones.
+    Crea un mapa interactivo usando Folium SIN clustering.
+    Los marcadores se añaden directamente al mapa.
     """
     try:
         # --- 1. Validación y preparación de datos ---
@@ -160,57 +162,41 @@ def create_folium_map(data, lat_col, lon_col, name_col=None, popup_cols=None, st
             pass # Si falla, continuar con el DataFrame tal como está
         if valid_coords_df.empty:
             return None, "No hay datos válidos para mostrar en el mapa."
-
         # --- 2. Inicialización del mapa ---
         center_lat = valid_coords_df[lat_col].mean()
         center_lon = valid_coords_df[lon_col].mean()
         m = folium.Map(location=[center_lat, center_lon], zoom_start=10, control_scale=True)
-
-        # --- 3. Configuración de Clusters ---
-        # Siempre crear un cluster 'default' para todos los puntos
-        marker_clusters = {}
-        default_cluster = plugins.MarkerCluster(name="Todos los puntos").add_to(m)
-        default_rgb = (0, 123, 255) # Color por defecto
-        marker_clusters['default'] = {'cluster': default_cluster, 'color': default_rgb}
-
-        # Si se proporciona una columna de estilo, crear clusters adicionales
+        # --- 3. Configuración de colores basados en estilo (opcional) ---
+        # Diccionario para almacenar colores por categoría de estilo
+        style_colors = {}
+        default_rgb = (0, 123, 255) # Color por defecto (azul)
         if style_col and style_col in valid_coords_df.columns:
             unique_styles = valid_coords_df[style_col].dropna().unique()
             if len(unique_styles) > 0:
-                color_palette = px.colors.qualitative.Plotly
+                color_palette = px.colors.qualitative.Plotly # O usa Set1, Dark24, etc.
                 for i, style_value in enumerate(unique_styles):
                     style_key = str(style_value)
                     hex_color = color_palette[i % len(color_palette)]
                     rgb_color = hex_to_rgb_safe(hex_color)
-                    # Crear un cluster para cada estilo
-                    cluster = plugins.MarkerCluster(name=style_key).add_to(m)
-                    marker_clusters[style_key] = {'cluster': cluster, 'color': rgb_color}
-                # El cluster 'default' sigue existiendo pero puede no usarse si hay estilos
-
-        # --- 4. Añadir marcadores a los clusters ---
+                    style_colors[style_key] = rgb_color
+        # --- 4. Añadir marcadores directamente al mapa ---
         for _, row in valid_coords_df.iterrows():
             try:
                 lat = float(row[lat_col])
                 lon = float(row[lon_col])
             except (ValueError, TypeError):
                 continue # Saltar filas con coordenadas no válidas
-
-            # --- 5. Determinar el cluster y color correctos ---
-            # Comenzar con valores por defecto
-            cluster_key = 'default'
+            # --- 5. Determinar el color del marcador ---
             marker_color = default_rgb
-
-            # Si hay una columna de estilo y el valor no es nulo, usarla
+            icon_color_str = 'white' # Color por defecto del icono
             if style_col and style_col in valid_coords_df.columns and pd.notna(row[style_col]):
                 style_val_key = str(row[style_col])
-                # Si el estilo existe en nuestros clusters, usarlo
-                if style_val_key in marker_clusters:
-                    cluster_key = style_val_key
-                    marker_color = marker_clusters[cluster_key]['color']
-
-            # Obtener el cluster correcto al que añadir el marcador
-            current_cluster = marker_clusters[cluster_key]['cluster']
-
+                if style_val_key in style_colors:
+                    marker_color = style_colors[style_val_key]
+                    # Ajustar color del ícono basado en el brillo del color del marcador
+                    r, g, b = marker_color
+                    brightness = (r * 299 + g * 587 + b * 114) / 1000
+                    icon_color_str = 'white' if brightness < 128 else 'black'
             # --- 6. Crear contenido del popup y tooltip ---
             popup_content = ""
             if popup_cols:
@@ -220,34 +206,26 @@ def create_folium_map(data, lat_col, lon_col, name_col=None, popup_cols=None, st
                 # Si no hay popup_cols específicas, usar el nombre o una etiqueta genérica
                 popup_name = str(row[name_col]) if name_col and name_col in valid_coords_df.columns and pd.notna(row[name_col]) else f"Punto ({lat:.4f}, {lon:.4f})"
                 popup_content = f"<b>{popup_name}</b>"
-
             tooltip_text = str(row[name_col]) if name_col and name_col in valid_coords_df.columns and pd.notna(row[name_col]) else f"ID: {_}"
-
-            # --- 7. Ajustar color del ícono basado en el color del marcador ---
-            r, g, b = marker_color
-            brightness = (r * 299 + g * 587 + b * 114) / 1000
-            icon_color_str = 'white' if brightness < 128 else 'black'
-
-            # --- 8. Crear y añadir el marcador al cluster ---
+            # --- 7. Crear y añadir el marcador directamente al mapa (m) ---
             marker = folium.Marker(
                 location=[lat, lon],
                 popup=folium.Popup(popup_content, max_width=300),
                 tooltip=tooltip_text,
                 icon=folium.Icon(color='lightgray', icon_color=icon_color_str, icon='map-marker', prefix='fa')
+                # Nota: Folium tiene colores predefinidos limitados para 'color'.
+                # Si deseas colores exactos por estilo, necesitas usar 'folium.CustomIcon' o CSS avanzado,
+                # o simplemente usar el color para el icon_color y dejar el marcador gris.
+                # Aquí usamos el color calculado para el icon_color y el marcador en gris claro.
             )
-            marker.add_to(current_cluster) # <-- AQUÍ está el cambio clave: añadir al cluster
-
-        # --- 9. Añadir control de capas si hay múltiples clusters ---
-        # Solo mostrar el control si se crearon clusters específicos además del 'default'
-        if len(marker_clusters) > 1:
-            folium.LayerControl().add_to(m) # Permite al usuario activar/desactivar clusters por estilo
-
+            marker.add_to(m) # <-- AQUÍ está el cambio clave: añadir directamente al mapa 'm'
+        # --- 8. (Opcional) Añadir control de capas si se usa estilo
+        # Como no hay clusters, no se añade LayerControl basado en clusters.
+        # Si se usa 'style_col' para cambiar el icon_color, eso ya se refleja visualmente.
         return m, None
-
     except Exception as e:
         # Proporcionar más detalles del error puede ser útil
         return None, f"Error al crear el mapa: {str(e)}"
-
 # --- FUNCIONES DE CARGA Y FILTRO DE DATOS ---
 @st.cache_data(show_spinner="Cargando y procesando datos...", hash_funcs={BytesIO: lambda _: None})
 def load_and_process(file, sheet_name=None):
@@ -331,7 +309,6 @@ def create_optimized_radar(data, metrics, category=None):
                     hoverinfo='r+name'
                 ))
             title = f"{category}"
-           
         else:
             means = data[valid_metrics].mean()
             for metric in valid_metrics:
@@ -375,10 +352,8 @@ def create_optimized_radar(data, metrics, category=None):
         return fig, None
     except Exception as e:
         return None, f"Error al generar radar: {str(e)}"
-
 # --- FUNCIONES DE VISUALIZACIÓN ---
 # (Mantener las otras funciones como create_optimized_radar, create_sociogram, etc., igual)
-
 def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col):
     """Genera matriz de Poder vs. Interés con cuadrantes mejorados, resultados y manejo de superposición."""
     try:
@@ -386,21 +361,16 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
         missing_cols = [col for col in required_cols if col not in data.columns]
         if missing_cols:
             return None, f"Columnas faltantes: {', '.join(missing_cols)}"
-
         # --- 1. Preparación de datos ---
         # Trabajar con una copia para no modificar el original
         plot_data = data.copy()
-        
         # Asegurarse de que las columnas de interés y poder sean numéricas
         plot_data[interest_col] = pd.to_numeric(plot_data[interest_col], errors='coerce')
         plot_data[power_col] = pd.to_numeric(plot_data[power_col], errors='coerce')
-        
         # Eliminar filas con valores NaN en las columnas críticas
         plot_data = plot_data.dropna(subset=[interest_col, power_col, stakeholder_col])
-
         if plot_data.empty:
              return None, "No hay datos válidos para mostrar en la matriz después de la limpieza."
-
         # --- 2. Cálculo de límites y puntos medios ---
         max_power = plot_data[power_col].max() * 1.05 # Reducir un poco el margen
         max_interest = plot_data[interest_col].max() * 1.05
@@ -411,10 +381,8 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
         range_padding = 0.02
         y_range = [max(0, min_power * (1 - range_padding)), max_power]
         x_range = [max(0, min_interest * (1 - range_padding)), max_interest]
-        
         power_mid = (y_range[1] + y_range[0]) / 2
         interest_mid = (x_range[1] + x_range[0]) / 2
-
         # --- 3. Asignación de Cuadrantes (usando datos originales limpios) ---
         plot_data['cuadrante'] = plot_data.apply(
             lambda row: (
@@ -424,13 +392,11 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
                 "Monitorear"
             ), axis=1
         )
-
         # --- 4. Manejo de Superposición: Agrupar y Agregar Contador ---
         # Redondear coordenadas para agrupar puntos cercanos/iguales
         DECIMALS_FOR_GROUPING = 5 # Ajusta según la precisión necesaria
         plot_data['_group_lat'] = plot_data[power_col].round(DECIMALS_FOR_GROUPING)
         plot_data['_group_lon'] = plot_data[interest_col].round(DECIMALS_FOR_GROUPING)
-        
         # Agrupar por coordenadas redondeadas y cuadrante
         grouped_data = plot_data.groupby(['_group_lat', '_group_lon', 'cuadrante'], as_index=False).agg({
             stakeholder_col: lambda x: list(x), # Lista de stakeholders
@@ -438,19 +404,14 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
             interest_col: 'first', # Valor de interés (es el mismo para el grupo)
             'cuadrante': 'first'   # Cuadrante (es el mismo para el grupo)
         })
-        
         # Renombrar la columna de lista para claridad
         grouped_data.rename(columns={stakeholder_col: 'stakeholders_list'}, inplace=True)
-        
         # Calcular el conteo de puntos por grupo
         grouped_data['count'] = grouped_data['stakeholders_list'].apply(len)
-        
         # Eliminar columnas temporales
         plot_data.drop(columns=['_group_lat', '_group_lon'], inplace=True, errors='ignore')
-
         # --- 5. Creación del Gráfico con Datos Agrupados ---
         fig = go.Figure()
-
         # Definir colores para cuadrantes
         quadrant_colors = {
             "Gestionar Activamente": '#2ca02c', # Verde
@@ -458,19 +419,15 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
             "Mantener Satisfechos": '#ff7f0e', # Naranja
             "Monitorear": '#d62728'   # Rojo
         }
-
         # Contar elementos por cuadrante para incluir en la leyenda
         total_counts = plot_data['cuadrante'].value_counts().to_dict()
-
         # Iterar por cada cuadrante
         for cuadrante, color in quadrant_colors.items():
             df_cuadrante_grouped = grouped_data[grouped_data['cuadrante'] == cuadrante]
             count_total = total_counts.get(cuadrante, 0) # Total de puntos en este cuadrante
-            
             if not df_cuadrante_grouped.empty:
                 # Incluir el conteo total en el nombre de la serie para la leyenda
                 legend_name = f"{cuadrante} ({count_total} elementos)"
-
                 # Crear texto para el hover que incluye todos los stakeholders del grupo
                 hover_texts = []
                 for _, row in df_cuadrante_grouped.iterrows():
@@ -489,7 +446,6 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
                                       f"<b>Coordenadas:</b> ({row[interest_col]:.{DECIMALS_FOR_GROUPING}f}, {row[power_col]:.{DECIMALS_FOR_GROUPING}f})<br>"
                                       f"<b>Cuadrante:</b> {row['cuadrante']}")
                     hover_texts.append(hover_text)
-
                 fig.add_trace(go.Scatter(
                     x=df_cuadrante_grouped[interest_col], # Eje X: Interés
                     y=df_cuadrante_grouped[power_col],    # Eje Y: Poder
@@ -507,7 +463,6 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
                     hoverinfo='text',
                     hovertext=hover_texts # Texto personalizado para el hover
                 ))
-
         # --- 6. Líneas divisorias y Rectángulos de fondo ---
         # Líneas divisorias
         fig.add_shape(type="line",
@@ -516,7 +471,6 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
         fig.add_shape(type="line",
                      x0=x_range[0], y0=power_mid, x1=x_range[1], y1=power_mid,
                      line=dict(color="gray", width=1.5, dash="dot"))
-
         # Rectángulos de fondo (usando los rangos calculados)
         fig.add_shape(type="rect",
             x0=x_range[0], y0=power_mid, x1=interest_mid, y1=y_range[1], # Mantener Satisfechos
@@ -530,7 +484,6 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
         fig.add_shape(type="rect",
             x0=interest_mid, y0=y_range[0], x1=x_range[1], y1=power_mid, # Monitorear
             fillcolor="rgba(173, 216, 230, 0.1)", line=dict(width=0))
-
         # --- 7. Layout del Gráfico ---
         fig.update_layout(
             title="Matriz de Interés vs. Poder (Puntos agrupados con contador)",
@@ -543,7 +496,6 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(240,240,240,0.8)',
              # Etiquetas en los cuadrantes (puedes mantenerlas o eliminarlas si la leyenda es suficiente)
-            
             legend=dict(
                 orientation="h",
                 yanchor="bottom",
@@ -554,98 +506,175 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
                 font=dict(size=10) # Tamaño de fuente más pequeño para la leyenda
             )
         )
-        
         # Preparar datos de resultados usando el DataFrame original sin agrupar para clasificación precisa
         result_df = plot_data[['cuadrante', stakeholder_col, interest_col, power_col]].sort_values(
             by=['cuadrante', interest_col, power_col], ascending=[True, False, False]
         )
-
         return fig, result_df
-
     except Exception as e:
         import traceback
         st.error(f"Error detallado en la matriz: {e}")
         # st.code(traceback.format_exc()) # Para depuración, opcional
         return None, f"Error al generar matriz: {str(e)}"
-
-# --- (Resto del código: show_record_details, generate_pdf_report, main, etc. permanece igual) ---
-
-
-def create_sociogram(data, source_col, target_col, weight_col=None, node_size_col=None, layout='circular'):
+# --- FUNCIONES DE VISUALIZACIÓN ---
+def create_sociogram(data, source_col, target1_col, target2_col=None, weight_col=None, node_size_col=None, layout='circular', include_target1=True, include_target2=True):
     """
     Crea un sociograma (diagrama de red) a partir de datos de relaciones.
+    Ahora soporta una o dos columnas de destino, muestra una leyenda y permite incluir/excluir tipos de relaciones.
+    Todos los nodos de Origen se dibujan, incluso si no tienen relaciones.
+    Nodos Origen: Amarillo. Nodos Colaboraciones: Verde. Nodos Conflictos: Rojo. Aristas: Negras.
+    Leyenda: Origen, Colaboraciones, Conflictos.
     """
     try:
+        # --- 1. Validación de entrada ---
         if not isinstance(data, pd.DataFrame):
             return None, "Los datos deben ser un DataFrame de pandas"
         if data.empty:
             return None, "El conjunto de datos está vacío"
-        required_cols = [source_col, target_col]
-        missing_cols = [col for col in required_cols if col not in data.columns]
-        if missing_cols:
-            return None, f"Faltan columnas requeridas: {', '.join(missing_cols)}"
-        clean_data = data.dropna(subset=[source_col, target_col])
-        if clean_data.empty:
-            return None, "No hay datos válidos después de eliminar filas con valores nulos"
+
+        # Validación de columnas basada en inclusión
+        required_cols = [source_col]
+        if include_target1 and target1_col:
+            required_cols.append(target1_col)
+        if include_target2 and target2_col:
+            required_cols.append(target2_col)
+
+        # target2_col es opcional, pero si se proporciona, debe existir
+        if target2_col and target2_col not in data.columns:
+             return None, f"La columna de destino 2 '{target2_col}' no existe en los datos."
+
+        # Filtrar filas que tengan al menos un origen válido
+        clean_data_for_relations = data.dropna(subset=[source_col])
+        if clean_data_for_relations.empty:
+            return None, "No hay datos válidos después de eliminar filas sin Origen"
+
+        # --- 2. Creación del grafo (NetworkX) ---
         G = nx.DiGraph()
-        for _, row in clean_data.iterrows():
-            source = str(row[source_col])
-            target = str(row[target_col])
-            if source == target:
-                continue
-            G.add_node(source)
-            G.add_node(target)
-            if weight_col and weight_col in data.columns:
-                try:
-                    weight = float(row[weight_col]) if pd.notna(row[weight_col]) else 1.0
-                except (ValueError, TypeError):
-                    weight = 1.0
-            else:
-                weight = 1.0
-            if G.has_edge(source, target):
-                G[source][target]['weight'] += weight
-            else:
-                G.add_edge(source, target, weight=weight)
+        # Identificar todos los nodos de origen únicos desde el dataset completo (filtrado)
+        all_source_nodes_from_data = set(data[source_col].dropna().astype(str))
+
+        # Añadir todos los nodos de origen al grafo desde el principio
+        for source_node in all_source_nodes_from_data:
+             G.add_node(source_node)
+
+        # Sets para rastrear roles
+        source_nodes_in_graph = set(all_source_nodes_from_data) # Todos los orígenes están en el grafo
+        target1_nodes = set()
+        target2_nodes = set() if target2_col else set()
+
+        # --- 3. Procesar relaciones ---
+        # Solo procesar relaciones si están incluidas
+        if include_target1 and target1_col:
+            for _, row in clean_data_for_relations.iterrows():
+                source = str(row[source_col])
+                # Procesar relación con Destino 1 (Colaboraciones)
+                if pd.notna(row[target1_col]):
+                    target1 = str(row[target1_col])
+                    if source != target1: # Evitar bucles
+                        G.add_node(target1) # Asegurar que el destino esté en el grafo
+                        target1_nodes.add(target1)
+                        # Agregar arista Origen -> Destino 1 (Colaboración)
+                        weight = 1.0
+                        if weight_col and weight_col in data.columns and pd.notna(row[weight_col]):
+                            try:
+                                weight = float(row[weight_col])
+                            except (ValueError, TypeError):
+                                pass
+                        if G.has_edge(source, target1):
+                            G[source][target1]['weight'] += weight
+                        else:
+                            G.add_edge(source, target1, weight=weight)
+
+        if include_target2 and target2_col:
+            for _, row in clean_data_for_relations.iterrows():
+                source = str(row[source_col])
+                # Procesar relación con Destino 2 (Conflictos)
+                if pd.notna(row[target2_col]):
+                    target2 = str(row[target2_col])
+                    if source != target2: # Evitar bucles
+                        G.add_node(target2) # Asegurar que el destino esté en el grafo
+                        target2_nodes.add(target2)
+                        # Agregar arista Origen -> Destino 2 (Conflicto)
+                        weight2 = 1.0
+                        if weight_col and weight_col in data.columns and pd.notna(row[weight_col]):
+                            try:
+                                weight2 = float(row[weight_col])
+                            except (ValueError, TypeError):
+                                pass
+                        if G.has_edge(source, target2):
+                            G[source][target2]['weight'] += weight2
+                        else:
+                            G.add_edge(source, target2, weight=weight2)
+
+        # --- 4. Diseño (Layout) del grafo ---
         if G.number_of_nodes() == 0:
-            return None, "No se pudieron crear nodos a partir de los datos"
-        # --- Mejora en el layout para reducir cruces ---
+             return None, "No se pudieron crear nodos a partir de los datos de Origen."
+
         if layout == 'spring':
-            # Aumentar iteraciones y ajustar k para separar más los nodos
-            pos = nx.spring_layout(G, k=5/np.sqrt(G.number_of_nodes()), iterations=100, seed=42) 
+            pos = nx.spring_layout(G, k=5/np.sqrt(G.number_of_nodes()), iterations=100, seed=42)
         elif layout == 'circular':
             pos = nx.circular_layout(G)
         elif layout == 'random':
             pos = nx.random_layout(G)
         else:
             pos = nx.circular_layout(G)  # Por defecto
-        # --- Generar colores únicos para nodos ---
-        nodes = list(G.nodes())
-        num_nodes = len(nodes)
-        hues = np.linspace(0, 1, num_nodes, endpoint=False)
+
+        # --- 5. Definición de colores fijos ---
+        COLOR_SOURCE = (255, 215, 0)    # Amarillo (Gold)
+        COLOR_COLABORACION = (50, 205, 50)   # Verde (LimeGreen)
+        COLOR_CONFLICTO = (220, 20, 60)   # Rojo (Crimson)
+        COLOR_EDGE = 'black'            # Color de las aristas
+        COLOR_ISOLATED_SOURCE = COLOR_SOURCE # Los orígenes aislados también son amarillos
+
+        # Diccionario para almacenar el color de cada nodo
         node_colors = {}
-        for i, node in enumerate(nodes):
-            rgb = colorsys.hsv_to_rgb(hues[i], 0.8, 0.8)
-            node_colors[node] = tuple(int(c * 255) for c in rgb)
-        # Extraer coordenadas y propiedades
-        node_x = []
-        node_y = []
-        node_text = []
-        node_sizes = []
-        node_labels_x = []
-        node_labels_y = []
-        node_colors_plotly = []
+
+        # Asignar colores basados en el rol primario del nodo
+        # Prioridad: Origen > Colaboración > Conflicto
+        # Recalcular sets basados en lo que realmente se procesó
+        only_conflicto = set()
+        colaboracion_and_or_conflicto = set()
+        source_nodes_final = source_nodes_in_graph
+
+        # Si se incluyó target2, calcular solo_conflicto
+        if include_target2 and target2_col:
+            # Solo conflictos que no son colaboraciones ni orígenes
+            only_conflicto = target2_nodes - target1_nodes - source_nodes_in_graph
+
+        # Si se incluyó target1, calcular colaboracion_and_or_conflicto
+        if include_target1 and target1_col:
+            colaboracion_and_or_conflicto = target1_nodes # Incluye Colaboración solos, Col+Conflicto, Col+Origen
+
+        # Asignar colores
+        for node in only_conflicto:
+            node_colors[node] = COLOR_CONFLICTO
+        for node in colaboracion_and_or_conflicto:
+            node_colors[node] = COLOR_COLABORACION # Verde para todos los de Colaboración
+        for node in source_nodes_final:
+             node_colors[node] = COLOR_SOURCE # Amarillo para todos los de Origen (prioridad más alta)
+
+        # --- 6. Extraer coordenadas y propiedades ---
+        node_data_by_type = {
+            'Origen': {'x': [], 'y': [], 'text': [], 'sizes': []},
+            'Colaboraciones': {'x': [], 'y': [], 'text': [], 'sizes': []},
+            'Conflictos': {'x': [], 'y': [], 'text': [], 'sizes': []}
+        }
+
+        # Calcular tamaños para todos los nodos que están en el grafo
+        node_sizes_dict = {}
         for node in G.nodes():
-            x, y = pos[node]
-            node_x.append(x)
-            node_y.append(y)
-            node_text.append(node)
-            node_colors_plotly.append(f'rgb{node_colors[node]}')
-            node_labels_x.append(x)
-            node_labels_y.append(y - 0.04)
+             # Calcular tamaño del nodo
             if node_size_col and node_size_col in data.columns:
-                node_data = data[(data[source_col].astype(str) == node) | (data[target_col].astype(str) == node)]
-                if not node_data.empty and pd.api.types.is_numeric_dtype(data[node_size_col]):
-                    size_val = node_data[node_size_col].mean()
+                # Buscar el valor en todas las columnas relevantes (origen, destino1, destino2)
+                masks = [data[source_col].astype(str) == node]
+                if include_target1 and target1_col:
+                    masks.append(data[target1_col].astype(str) == node)
+                if include_target2 and target2_col:
+                     masks.append(data[target2_col].astype(str) == node)
+                combined_mask = pd.concat(masks, axis=1).any(axis=1)
+                node_data_for_size = data[combined_mask]
+                if not node_data_for_size.empty and pd.api.types.is_numeric_dtype(data[node_size_col]):
+                    size_val = node_data_for_size[node_size_col].mean()
                     if pd.notna(size_val):
                         min_size, max_size = 20, 60
                         min_val = data[node_size_col].min()
@@ -654,83 +683,205 @@ def create_sociogram(data, source_col, target_col, weight_col=None, node_size_co
                             normalized_size = min_size + (size_val - min_val) * (max_size - min_size) / (max_val - min_val)
                         else:
                             normalized_size = (min_size + max_size) / 2
-                        node_sizes.append(normalized_size)
+                        node_sizes_dict[node] = normalized_size
                     else:
-                        node_sizes.append(30)
+                        node_sizes_dict[node] = 30
                 else:
-                    node_sizes.append(30)
+                    node_sizes_dict[node] = 30
             else:
                 degree = G.degree(node)
                 min_size, max_size = 20, 60
                 if G.number_of_nodes() > 1:
-                    min_degree = min([G.degree(n) for n in G.nodes()])
-                    max_degree = max([G.degree(n) for n in G.nodes()])
+                    degrees = [G.degree(n) for n in G.nodes()]
+                    min_degree, max_degree = min(degrees), max(degrees)
                     if max_degree != min_degree:
                         normalized_size = min_size + (degree - min_degree) * (max_size - min_size) / (max_degree - min_degree)
                     else:
                         normalized_size = (min_size + max_size) / 2
                 else:
                     normalized_size = (min_size + max_size) / 2
-                node_sizes.append(normalized_size)
-        # Crear trazos para las aristas con colores
-        edge_traces = []
-        edge_colors = px.colors.qualitative.Plotly
-        for i, (source, target, data_edge) in enumerate(G.edges(data=True)):
-            x0, y0 = pos[source]
-            x1, y1 = pos[target]
-            source_index = nodes.index(source) if source in nodes else 0
-            edge_color = edge_colors[source_index % len(edge_colors)]
-            edge_trace = go.Scatter(
-                x=[x0, x1, None],
-                y=[y0, y1, None],
-                line=dict(width=1.5, color=edge_color),
-                hoverinfo='text',
-                text=f"{source} -> {target}",
-                mode='lines',
-                showlegend=False,
-                name=f"Edge {i}"
-            )
-            edge_traces.append(edge_trace)
-        fig = go.Figure()
-        for trace in edge_traces:
-             fig.add_trace(trace)
-        fig.add_trace(go.Scatter(
-            x=node_x, y=node_y,
-            mode='markers',
+                node_sizes_dict[node] = normalized_size
+
+        # Asignar nodos a sus respectivas listas según su tipo/rol para la leyenda
+        for node in G.nodes():
+            x, y = pos[node]
+            size = node_sizes_dict[node]
+            # Determinar el tipo para la leyenda basado en el color/rol
+            if node in source_nodes_final:
+                node_type_key = 'Origen'
+            elif node in colaboracion_and_or_conflicto:
+                node_type_key = 'Colaboraciones'
+            elif node in only_conflicto:
+                node_type_key = 'Conflictos'
+            else:
+                # Nodo sin relación procesada (aislado o no relevante según filtros)
+                # Lo asignamos a Origen si es uno, de lo contrario, lo ignoramos o asignamos por defecto.
+                # Dado que todos los orígenes se añaden, debería estar en source_nodes_final.
+                # Si llega aquí, podría ser un nodo destino que no se procesó.
+                # Para simplificar, lo asignamos a Origen.
+                node_type_key = 'Origen'
+
+            # Solo añadir a node_data_by_type si el tipo está incluido
+            if (node_type_key == 'Origen') or \
+               (node_type_key == 'Colaboraciones' and include_target1) or \
+               (node_type_key == 'Conflictos' and include_target2):
+                node_data_by_type[node_type_key]['x'].append(x)
+                node_data_by_type[node_type_key]['y'].append(y)
+                node_data_by_type[node_type_key]['text'].append(node)
+                node_data_by_type[node_type_key]['sizes'].append(size)
+
+        # --- 7. Crear trazos para las aristas (negras) ---
+        # Solo añadir aristas si sus extremos están en el grafo y su tipo está incluido
+        edge_trace = go.Scatter(
+            x=[], y=[],
+            line=dict(width=1.5, color=COLOR_EDGE),
             hoverinfo='text',
-            text=node_text,
-            marker=dict(
-                showscale=False,
-                color=node_colors_plotly,
-                size=node_sizes,
-                line=dict(width=2, color='DarkSlateGrey')
-            ),
+            text=[],
+            mode='lines',
             showlegend=False,
-            name='Nodos'
-        ))
-        fig.add_trace(go.Scatter(
-            x=node_labels_x, y=node_labels_y,
-            mode='text',
-            text=node_text,
-            textposition="middle center",
-            textfont=dict(size=10, color='black'),
-            showlegend=False,
-            hoverinfo='skip'
-        ))
+            name='Relaciones'
+        )
+
+        # Añadir aristas solo si sus nodos destino están en los sets relevantes
+        for source, target, data_edge in G.edges(data=True):
+            # Verificar si la arista debe mostrarse según los filtros
+            show_edge = False
+            # Si la arista va a un nodo de colaboración y se incluyen colaboraciones
+            if include_target1 and target in target1_nodes:
+                show_edge = True
+            # Si la arista va a un nodo de conflicto y se incluyen conflictos
+            elif include_target2 and target in target2_nodes:
+                show_edge = True
+
+            if show_edge:
+                x0, y0 = pos[source]
+                x1, y1 = pos[target]
+                edge_trace['x'] += (x0, x1, None)
+                edge_trace['y'] += (y0, y1, None)
+                edge_trace['text'] += (f"{source} -> {target}", "", "")
+
+        # --- 8. Construcción de la figura Plotly ---
+        fig = go.Figure()
+        # Añadir trazo de aristas
+        fig.add_trace(edge_trace)
+
+        # Diccionario de colores para la leyenda
+        legend_colors = {
+            'Origen': f'rgb{COLOR_SOURCE}',
+            'Colaboraciones': f'rgb{COLOR_COLABORACION}',
+            'Conflictos': f'rgb{COLOR_CONFLICTO}'
+        }
+
+        # Añadir trazos de nodos por tipo para la leyenda
+        # Solo si el tipo está incluido y hay nodos de ese tipo
+        if include_target1: # Siempre mostrar Origen, pero solo añadir trazo si hay nodos
+             if node_data_by_type['Origen']['x']:
+                fig.add_trace(go.Scatter(
+                    x=node_data_by_type['Origen']['x'], y=node_data_by_type['Origen']['y'],
+                    mode='markers',
+                    hoverinfo='text',
+                    text=node_data_by_type['Origen']['text'],
+                    marker=dict(
+                        showscale=False,
+                        color=legend_colors['Origen'],
+                        size=node_data_by_type['Origen']['sizes'],
+                        line=dict(width=2, color='DarkSlateGrey')
+                    ),
+                    showlegend=True,
+                    name='Origen'
+                ))
+             if node_data_by_type['Colaboraciones']['x']:
+                fig.add_trace(go.Scatter(
+                    x=node_data_by_type['Colaboraciones']['x'], y=node_data_by_type['Colaboraciones']['y'],
+                    mode='markers',
+                    hoverinfo='text',
+                    text=node_data_by_type['Colaboraciones']['text'],
+                    marker=dict(
+                        showscale=False,
+                        color=legend_colors['Colaboraciones'],
+                        size=node_data_by_type['Colaboraciones']['sizes'],
+                        line=dict(width=2, color='DarkSlateGrey')
+                    ),
+                    showlegend=True,
+                    name='Colaboraciones'
+                ))
+        if include_target2 and node_data_by_type['Conflictos']['x']:
+             fig.add_trace(go.Scatter(
+                x=node_data_by_type['Conflictos']['x'], y=node_data_by_type['Conflictos']['y'],
+                mode='markers',
+                hoverinfo='text',
+                text=node_data_by_type['Conflictos']['text'],
+                marker=dict(
+                    showscale=False,
+                    color=legend_colors['Conflictos'],
+                    size=node_data_by_type['Conflictos']['sizes'],
+                    line=dict(width=2, color='DarkSlateGrey')
+                ),
+                showlegend=True,
+                name='Conflictos'
+            ))
+
+
+        # Añadir trazo de etiquetas de texto para nodos (opcional, sin leyenda)
+        all_node_labels_x = []
+        all_node_labels_y = []
+        all_node_labels_text = []
+        # Recopilar nodos que se van a mostrar (de los trazos añadidos)
+        shown_nodes = set()
+        for trace in fig.data:
+            if trace.mode == 'markers' and hasattr(trace, 'text'):
+                 shown_nodes.update(trace.text)
+
+        for node in shown_nodes: # Solo etiquetas para nodos mostrados
+             if node in pos: # Asegurar que el nodo tenga posición
+                x, y = pos[node]
+                all_node_labels_x.append(x)
+                all_node_labels_y.append(y - 0.04) # Ajuste de posición
+                all_node_labels_text.append(node)
+
+        if all_node_labels_x: # Solo añadir si hay etiquetas
+            fig.add_trace(go.Scatter(
+                x=all_node_labels_x, y=all_node_labels_y,
+                mode='text',
+                text=all_node_labels_text,
+                textposition="middle center",
+                textfont=dict(size=10, color='black'),
+                showlegend=False,
+                hoverinfo='skip',
+                name='Etiquetas'
+            ))
+
+        # --- 9. Diseño final del gráfico ---
+        title_text = "Sociograma"
         fig.update_layout(
-            title="Sociograma",
+            title=title_text,
             title_x=0.5,
-            showlegend=False,
+            showlegend=True,
             hovermode='closest',
             margin=dict(b=20,l=5,r=5,t=40),
-            annotations=[ dict(text="", showarrow=False, xref="paper", yref="paper", x=0.005, y=-0.002 ) ],
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
             yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            height=600
+            height=600,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=-0.3,
+                xanchor="center",
+                x=0.5,
+                traceorder='normal',
+                font=dict(size=10),
+                bgcolor="rgba(255, 255, 255, 0.5)",
+                bordercolor="Gray",
+                borderwidth=1
+            )
         )
         return fig, None
     except Exception as e:
+        import traceback
+        # st.error(f"Excepción en create_sociogram: {e}") # Opcional para depuración
+        # st.code(traceback.format_exc())
         return None, f"Error al generar el sociograma: {str(e)}"
+
 def show_record_details(record):
     """Muestra los detalles de un registro en una ventana modal"""
     st.markdown("### 📄 Detalles del Registro")
@@ -760,6 +911,13 @@ def generate_pdf_report(filtered_df, plots_data, stats, filename="reporte_analit
                     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
                     temp_files.append(temp_file.name)
                     temp_file.close()
+                    plot_data['fig'].write_image(
+                        temp_file.name,
+                        format='png',
+                        width=1200, # Ancho en píxeles
+                        height=800, # Alto en píxeles
+                        scale=3     # Factor de escala (3x = ~300 DPI, 4x = ~400 DPI)
+                        )
                     plot_data['fig'].write_image(temp_file.name)
                     pdf.add_plot(temp_file.name, plot_data['caption'])
                 except Exception as e:
@@ -806,7 +964,7 @@ def main():
         "📋 Datos Filtrados", 
         "📈 Análisis", 
         "📊 Visualizaciones", 
-        "🕷️ Radar",
+        "蜘️ Radar",
         "🔄 Matriz Poder-Interés",
         "👥 Sociograma",
         "gMaps", # Nueva pestaña para Georreferenciación
@@ -1030,66 +1188,129 @@ def main():
             if len(filtered_df.columns) >= 2:
                 text_cols = filtered_df.select_dtypes(include=['object', 'string']).columns.tolist()
                 numeric_cols = filtered_df.select_dtypes(include='number').columns.tolist()
+
+                # Nueva interfaz con dos columnas de destino
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
-                    source_col = st.selectbox("Columna de ORIGEN", text_cols, key="source_col")
+                    source_col = st.selectbox("Columna de ORIGEN", text_cols, key="source_col_socio")
                 with col2:
-                    target_col = st.selectbox("Columna de DESTINO", text_cols, key="target_col")
+                    target1_col = st.selectbox("Columna de DESTINO 1", text_cols, key="target1_col_socio")
                 with col3:
-                    weight_col = st.selectbox("Columna de PESO (opcional)", [None] + numeric_cols, key="weight_col")
+                    # target2_col es opcional
+                    target2_col = st.selectbox("Columna de DESTINO 2 (opcional)", [None] + text_cols, key="target2_col_socio")
                 with col4:
-                    layout = st.selectbox("Diseño", ['circular', 'spring', 'random'], key="layout")
-                node_size_col = st.selectbox("Tamaño de nodos (opcional)", [None] + numeric_cols + text_cols, key="node_size_col")
+                    layout = st.selectbox("Diseño", ['circular', 'spring', 'random'], key="layout_socio")
+
+                col5, col6 = st.columns(2)
+                with col5:
+                     weight_col = st.selectbox("Columna de PESO (opcional)", [None] + numeric_cols, key="weight_col_socio")
+                with col6:
+                    node_size_col = st.selectbox("Tamaño de nodos (opcional)", [None] + numeric_cols + text_cols, key="node_size_col_socio")
+
+                # --- NUEVOS CONTROLES PARA FILTRAR RELACIONES ---
+                st.markdown("---")
+                st.subheader("Filtrar Relaciones")
+                # Usamos st.checkbox para permitir seleccionar qué relaciones incluir
+                # Los valores por defecto pueden ser True si la columna existe
+                include_target1_default = target1_col is not None
+                include_target2_default = target2_col is not None
+
+                col_filter1, col_filter2 = st.columns(2)
+                with col_filter1:
+                    include_target1 = st.checkbox("Incluir DESTINO 1 (Colaboraciones)", value=include_target1_default, key="include_target1")
+                with col_filter2:
+                    include_target2 = st.checkbox("Incluir DESTINO 2 (Conflictos)", value=include_target2_default, key="include_target2")
+                # --- FIN DE NUEVOS CONTROLES ---
+
+                # Botón para generar el sociograma
                 if st.button("Generar Sociograma", key="sociogram_button"):
-                    if source_col and target_col:
+                    # Verificar que las columnas necesarias estén seleccionadas
+                    # Solo se requiere source_col y al menos una de las columnas destino si se va a incluir
+                    if not source_col:
+                        st.warning("Por favor selecciona la columna de origen.")
+                    elif (include_target1 and not target1_col) and (include_target2 and not target2_col):
+                         st.warning("Por favor selecciona al menos una columna de destino para incluir.")
+                    elif not (include_target1 or include_target2):
+                         st.warning("Por favor selecciona al menos un tipo de relación para incluir (DESTINO 1 o DESTINO 2).")
+                    else:
                         with st.spinner("Creando sociograma..."):
+                            # Llamar a la función actualizada con los nuevos parámetros de filtro
                             fig, error = create_sociogram(
-                                filtered_df, 
-                                source_col, 
-                                target_col, 
+                                filtered_df,
+                                source_col,
+                                target1_col,
+                                target2_col if target2_col != None else None,
                                 weight_col if weight_col != None else None,
                                 node_size_col if node_size_col != None else None,
-                                layout
+                                layout,
+                                include_target1, # Pasar el filtro para destino 1
+                                include_target2  # Pasar el filtro para destino 2
                             )
                         if fig:
                             st.plotly_chart(fig, use_container_width=True)
                             st.session_state.report_plots.append({
                                 'type': 'plot',
                                 'fig': fig,
-                                'caption': f"Sociograma: {source_col} → {target_col}"
+                                'caption': f"Sociograma: {source_col}" +
+                                           (f" → {target1_col}" if include_target1 and target1_col else "") +
+                                           (f" & {target2_col}" if include_target2 and target2_col else "")
                             })
-                            st.subheader("Estadísticas de la Red")
-                            temp_data = filtered_df.dropna(subset=[source_col, target_col])
-                            G = nx.DiGraph()
-                            for _, row in temp_data.iterrows():
-                                s, t = str(row[source_col]), str(row[target_col])
-                                if s != t:
-                                    if weight_col and weight_col in filtered_df.columns:
-                                        try:
-                                            w = float(row[weight_col]) if pd.notna(row[weight_col]) else 1.0
-                                        except:
+                            # --- Estadísticas de la Red ---
+                            # Reutilizamos la lógica de creación del grafo para calcular métricas
+                            # Asegurarse de aplicar los mismos filtros aquí
+                            temp_data = filtered_df.dropna(subset=[source_col])
+                            G_stats = nx.DiGraph()
+                            # Añadir todos los orígenes
+                            for source_node in set(filtered_df[source_col].dropna().astype(str)):
+                                G_stats.add_node(source_node)
+
+                            # Procesar relaciones solo si están incluidas
+                            if include_target1 and target1_col:
+                                for _, row in temp_data.iterrows():
+                                    s = str(row[source_col])
+                                    if pd.notna(row[target1_col]):
+                                        t1 = str(row[target1_col])
+                                        if s != t1:
                                             w = 1.0
-                                    else:
-                                        w = 1.0
-                                    if G.has_edge(s, t):
-                                        G[s][t]['weight'] += w
-                                    else:
-                                        G.add_edge(s, t, weight=w)
+                                            if weight_col and weight_col in filtered_df.columns:
+                                                try:
+                                                    w = float(row[weight_col]) if pd.notna(row[weight_col]) else 1.0
+                                                except:
+                                                    w = 1.0
+                                            if G_stats.has_edge(s, t1):
+                                                G_stats[s][t1]['weight'] += w
+                                            else:
+                                                G_stats.add_edge(s, t1, weight=w)
+                            if include_target2 and target2_col:
+                                for _, row in temp_data.iterrows():
+                                    s = str(row[source_col])
+                                    if pd.notna(row[target2_col]):
+                                        t2 = str(row[target2_col])
+                                        if s != t2: # Evitar bucles
+                                            w2 = 1.0
+                                            if weight_col and weight_col in filtered_df.columns:
+                                                 try:
+                                                    w2 = float(row[weight_col]) if pd.notna(row[weight_col]) else 1.0
+                                                 except:
+                                                    w2 = 1.0
+                                            if G_stats.has_edge(s, t2):
+                                                G_stats[s][t2]['weight'] += w2
+                                            else:
+                                                G_stats.add_edge(s, t2, weight=w2)
+
                             col1, col2, col3, col4 = st.columns(4)
-                            col1.metric("Nodos", G.number_of_nodes())
-                            col2.metric("Aristas", G.number_of_edges())
-                            if G.number_of_nodes() > 1:
-                                density = nx.density(G)
+                            col1.metric("Nodos", G_stats.number_of_nodes())
+                            col2.metric("Aristas", G_stats.number_of_edges())
+                            if G_stats.number_of_nodes() > 1:
+                                density = nx.density(G_stats)
                                 col3.metric("Densidad", f"{density:.3f}")
                             else:
                                 col3.metric("Densidad", "N/A")
-                            if G.number_of_nodes() > 0:
-                                avg_degree = sum(dict(G.degree()).values()) / G.number_of_nodes()
+                            if G_stats.number_of_nodes() > 0:
+                                avg_degree = sum(dict(G_stats.degree()).values()) / G_stats.number_of_nodes()
                                 col4.metric("Grado promedio", f"{avg_degree:.2f}")
                         else:
                             st.error(error)
-                    else:
-                        st.warning("Por favor selecciona las columnas de origen y destino")
             else:
                 st.warning("Se necesitan al menos 2 columnas para crear un sociograma")
         else:
