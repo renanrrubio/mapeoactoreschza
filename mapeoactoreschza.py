@@ -371,18 +371,24 @@ def create_power_interest_matrix(data, power_col, interest_col, stakeholder_col)
         plot_data = plot_data.dropna(subset=[interest_col, power_col, stakeholder_col])
         if plot_data.empty:
              return None, "No hay datos válidos para mostrar en la matriz después de la limpieza."
-        # --- 2. Cálculo de límites y puntos medios ---
-        max_power = plot_data[power_col].max() * 1.05 # Reducir un poco el margen
-        max_interest = plot_data[interest_col].max() * 1.05
-        # Manejar caso donde el mínimo podría ser negativo o cero
-        min_power = plot_data[power_col].min()
-        min_interest = plot_data[interest_col].min()
-        # Ajustar rangos para que empiecen desde 0 o un poco menos si es necesario
-        range_padding = 0.02
-        y_range = [max(0, min_power * (1 - range_padding)), max_power]
-        x_range = [max(0, min_interest * (1 - range_padding)), max_interest]
-        power_mid = (y_range[1] + y_range[0]) / 2
-        interest_mid = (x_range[1] + x_range[0]) / 2
+        # --- 2. Cálculo de límites y puntos medios (MODIFICADO) ---
+        # Establecer límites fijos del 1 al 5 con un pequeño padding para visualización
+        fixed_min = 1
+        fixed_max = 5
+        range_padding = 0.05 # 5% de padding
+
+        # Calcular el padding absoluto basado en el rango fijo
+        padding_value = (fixed_max - fixed_min) * range_padding
+
+        # Establecer los rangos fijos con padding
+        y_range = [fixed_min - padding_value, fixed_max + padding_value]
+        x_range = [fixed_min - padding_value, fixed_max + padding_value]
+
+        # Calcular los puntos medios basados en el rango fijo
+        power_mid = (fixed_max + fixed_min) / 2
+        interest_mid = (fixed_max + fixed_min) / 2
+        # --- Fin de la sección modificada ---
+        
         # --- 3. Asignación de Cuadrantes (usando datos originales limpios) ---
         plot_data['cuadrante'] = plot_data.apply(
             lambda row: (
