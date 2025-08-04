@@ -965,7 +965,8 @@ def generate_pdf_report(filtered_df, plots_data, stats, filename="reporte_analit
 
 # --- FUNCIÓN PRINCIPAL ---
 def main():
-    st.title("🚀 MAPEO DE ACTORES - VALLE CHANCAY - ZAÑA")
+    st.image("logo.png", width=200)
+    st.title("MAPEO DE ACTORES: VALLE CHANCAY - LAMBAYEQUE")
     st.markdown("---")
     uploaded_file = st.file_uploader(
         "Sube tu archivo Excel",
